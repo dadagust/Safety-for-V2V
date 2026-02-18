@@ -1,0 +1,32 @@
+seed: 1337
+device: cuda
+
+audio:
+  sr: 16000
+  clip_seconds: 4.0
+  vad: false
+  vad_mode: 2
+
+features:
+  n_mels: 80
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+
+train:
+  batch_size: 16
+  epochs: 5
+  lr: 1e-3
+  weight_decay: 1e-5
+  num_workers: 2
+
+augment:
+  enable: true
+  noise_prob: 0.5
+  noise_snr_db_min: 10
+  noise_snr_db_max: 30
+  reverb_prob: 0.2
+  rir_dir: null
+  codec_prob: 0.0
+  codec: opus
+  codec_bitrate: 16000

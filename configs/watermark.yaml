@@ -1,0 +1,10 @@
+seed: 1337
+delta_db: 1.2
+n_fft: 1024
+hop_length: 256
+win_length: 1024
+window: hann
+sr: 16000
+f_min_hz: 500
+f_max_hz: 7000
+threshold: 0.02
