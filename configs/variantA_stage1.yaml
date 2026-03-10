@@ -1,0 +1,76 @@
+seed: 1337
+
+audio:
+  sample_rate: 16000
+  segment_seconds: 4.0
+  watermark_seconds: 2.0   # unused in embed.mode=dropout, kept for compatibility
+
+# Variant A: localized watermark (presence mask) + low latency
+embed:
+  mode: dropout
+  ensure_prefix_seconds: 1.0
+  num_holes: [0, 1]
+  hole_seconds: [0.15, 0.40]
+  ramp_ms: 10.0
+
+latency_train:
+  enable: false
+
+model:
+  nbits: 16
+  msg_dim: 64
+  enc_hidden: 128
+  det_channels: [64, 128, 256, 256]
+  det_kernel_size: 9
+  det_strides: [2, 2, 2, 2]
+  max_delta: 0.07
+
+
+train:
+  batch_size: 8
+  num_workers: 2
+  lr: 0.0002
+  epochs: 12
+  steps_per_epoch: 2000
+  p_watermark: 0.8
+  log_every: 50
+  ckpt_dir: checkpoints
+  save_every_steps: 500
+
+
+loss:
+  presence_weight: 1.0
+  bit_weight: 4.0
+  stft_weight: 0.10
+  l2_weight: 0.05
+  stft_scales:
+    - {n_fft: 512, hop: 128, win: 512}
+    - {n_fft: 1024, hop: 256, win: 1024}
+
+
+# Stage 1 curriculum: NO time-warp yet (speed/crop off)
+attacks_train:
+  noise_snr_db: [25, 45]
+  gain_db: [-3, 3]
+  resample_factor: [1.0, 1.0]
+  lowpass_hz: [3500, 8000]
+  highpass_hz: [20, 200]
+  crop_seconds: [0.0, 0.0]
+  p_lowpass: 0.5
+  p_highpass: 0.3
+
+attacks_eval:
+  mp3_bitrates_k: [32, 64, 128]
+  aac_bitrates_k: [48, 96, 192]
+  noise_snr_db_list: [20, 10, 5]
+  resample_factor_list: [0.85, 0.9, 1.1, 1.2]
+  lowpass_hz_list: [3000, 6000]
+  crop_seconds_list: [0.5, 1.0]
+  bitdepth_list: [8, 12]
+
+latency_probe:
+  chunk_seconds: [0.25, 0.5, 1.0, 2.0]
+
+detection:
+  presence_threshold: 0.5
+  min_positive_fraction: 0.05

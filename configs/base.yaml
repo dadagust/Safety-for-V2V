@@ -1,0 +1,60 @@
+seed: 1337
+
+audio:
+  sample_rate: 16000
+  segment_seconds: 4.0
+  watermark_seconds: 2.0
+
+model:
+  nbits: 32
+  msg_dim: 32
+  enc_hidden: 64
+  det_channels: [32, 64, 128, 128]
+  det_kernel_size: 7
+  det_strides: [2, 2, 2, 2]
+  max_delta: 0.02   # max watermark amplitude (peak), keep small for inaudibility
+
+train:
+  batch_size: 8
+  num_workers: 2
+  lr: 0.0002
+  epochs: 10
+  steps_per_epoch: 2000
+  p_watermark: 0.5
+  grad_clip: 1.0
+  log_every: 50
+  ckpt_dir: checkpoints
+  save_every_steps: 500
+
+loss:
+  presence_weight: 1.0
+  bit_weight: 1.0
+  stft_weight: 0.5
+  l2_weight: 0.2
+  stft_scales:
+    - {n_fft: 512, hop: 128, win: 512}
+    - {n_fft: 1024, hop: 256, win: 1024}
+
+attacks_train:
+  noise_snr_db: [15, 40]      # uniform range
+  gain_db: [-6, 6]            # uniform range
+  resample_factor: [0.9, 1.1] # uniform range (speed change)
+  lowpass_hz: [3500, 7000]    # uniform range (Hz)
+  highpass_hz: [20, 200]      # uniform range (Hz)
+  crop_seconds: [0.0, 0.2]    # uniform range; removes up to X seconds then pads
+
+attacks_eval:
+  mp3_bitrates_k: [32, 64, 128]
+  aac_bitrates_k: [48, 96, 192]
+  noise_snr_db_list: [20, 10, 5]
+  resample_factor_list: [0.85, 0.9, 1.1, 1.2]
+  lowpass_hz_list: [3000, 6000]
+  crop_seconds_list: [0.5, 1.0]
+  bitdepth_list: [8, 12]
+
+latency_probe:
+  chunk_seconds: [0.25, 0.5, 1.0, 2.0]
+
+detection:
+  presence_threshold: 0.5
+  min_positive_fraction: 0.1   # fraction of frames above threshold to call "present"

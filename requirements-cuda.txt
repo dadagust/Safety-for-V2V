@@ -1,0 +1,9 @@
+--index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://pypi.org/simple
+
+torch
+numpy>=1.24
+scipy>=1.10
+soundfile>=0.10
+PyYAML>=6.0
+tqdm>=4.60

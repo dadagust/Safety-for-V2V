@@ -1,0 +1,58 @@
+seed: 1337
+
+audio:
+  sample_rate: 16000
+  segment_seconds: 2.0
+  watermark_seconds: 2.0
+
+embed:
+  mode: dropout
+  ensure_prefix_seconds: 2.0
+  num_holes: [0, 0]
+  hole_seconds: [0.0, 0.0]
+  ramp_ms: 0.0
+
+latency_train:
+  enable: false
+
+model:
+  nbits: 8
+  msg_dim: 128
+  enc_hidden: 128
+  det_channels: [64, 128, 256, 256]
+  det_kernel_size: 9
+  det_strides: [2, 2, 2, 2]
+  max_delta: 0.05
+
+train:
+  batch_size: 8
+  num_workers: 2
+  lr: 0.0003
+  epochs: 5
+  steps_per_epoch: 500
+  p_watermark: 1.0
+  log_every: 20
+  ckpt_dir: checkpoints_debug
+  save_every_steps: 250
+
+loss:
+  presence_weight: 1.0
+  bit_weight: 1.0
+  stft_weight: 0.0
+  l2_weight: 0.0
+  stft_scales:
+    - {n_fft: 512, hop: 128, win: 512}
+
+attacks_train:
+  noise_snr_db: [100, 100]
+  gain_db: [0, 0]
+  resample_factor: [1.0, 1.0]
+  lowpass_hz: [8000, 8000]
+  highpass_hz: [20, 20]
+  crop_seconds: [0.0, 0.0]
+  p_lowpass: 0.0
+  p_highpass: 0.0
+
+detection:
+  presence_threshold: 0.5
+  min_positive_fraction: 0.05
