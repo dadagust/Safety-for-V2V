@@ -42,20 +42,20 @@ python train.py --config configs/debug_stage0.yaml --train_manifest manifests/li
 Learn to decode message bits reliably before strong localization/latency constraints.
 
 ```bash
-python train.py --config configs/variantA_stage1.yaml --train_manifest manifests/librispeech_train.csv --val_manifest manifests/librispeech_val.csv
+python train.py --config configs/stage1_bridge_4bit.yaml --train_manifest manifests/librispeech_train.csv --val_manifest manifests/librispeech_val.csv
 ```
 
 ### 2) Localized watermark warm-up
 Resume from stage 1, but now the watermark becomes localized by adding holes.
 
 ```bash
-python train.py --config configs/variantA_stage2.yaml --train_manifest manifests/librispeech_train.csv --val_manifest manifests/librispeech_val.csv --resume checkpoints_stage1/best_clean_bitacc.pt
+python train.py --config configs/stage2_detector_4bit.yaml --train_manifest manifests/librispeech_train.csv --val_manifest manifests/librispeech_val.csv --resume checkpoints_stage1/best_clean_bitacc.pt
 ```
 
 ### 3) Localized + lower-latency + mild time-warp
 
 ```bash
-python train.py --config configs/variantA_stage3.yaml --train_manifest manifests/librispeech_train.csv --val_manifest manifests/librispeech_val.csv --resume checkpoints_stage2/best_clean_bitacc.pt
+python train.py --config configs/stage3_localize_4bit.yaml --train_manifest manifests/librispeech_train.csv --val_manifest manifests/librispeech_val.csv --resume checkpoints_stage2/best_clean_bitacc.pt
 ```
 
 ### 4) Optional stronger robustness fine-tune
@@ -71,19 +71,19 @@ By default, `train.py --resume ...` loads **model weights only**. That is the re
 Clean evaluation:
 
 ```bash
-python eval.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --no_attacks --embed_mode auto
+python eval.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --no_attacks --embed_mode auto
 ```
 
 Attacked evaluation:
 
 ```bash
-python eval.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --embed_mode auto
+python eval.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --embed_mode auto
 ```
 
 ## Robustness sweep
 
 ```bash
-python robustness_eval.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --out results/robustness.csv --latency
+python robustness_eval.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --out results/robustness.csv --latency
 ```
 
 ## Listening examples
@@ -99,25 +99,25 @@ This writes:
 Example with a direct input file:
 
 ```bash
-python scripts/render_watermark_examples.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --input data/LibriSpeech/test-clean/61/70968/61-70968-0000.flac --out_dir examples/listen_001
+python scripts/render_watermark_examples.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --input data/LibriSpeech/test-clean/61/70968/61-70968-0000.flac --out_dir examples/listen_001
 ```
 
 Or from a manifest item:
 
 ```bash
-python scripts/render_watermark_examples.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --index 0 --out_dir examples/listen_000
+python scripts/render_watermark_examples.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --index 0 --out_dir examples/listen_000
 ```
 
 You can also fix the payload bits:
 
 ```bash
-python scripts/render_watermark_examples.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --index 0 --bits 1011001110001111 --out_dir examples/listen_fixed_bits
+python scripts/render_watermark_examples.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --index 0 --bits 1011001110001111 --out_dir examples/listen_fixed_bits
 ```
 
 If CPU preview is slow, render a shorter segment:
 
 ```bash
-python scripts/render_watermark_examples.py --config configs/variantA_stage3.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --index 0 --segment_seconds_override 1.5 --out_dir examples/listen_short
+python scripts/render_watermark_examples.py --config configs/stage3_localize_4bit.yaml --checkpoint checkpoints_stage3/latest.pt --manifest manifests/librispeech_test.csv --index 0 --segment_seconds_override 1.5 --out_dir examples/listen_short
 ```
 
 ## Main files

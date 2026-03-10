@@ -196,6 +196,24 @@ def run_validation(
 
     return {k: float(np.mean(v)) if len(v) else 0.0 for k, v in agg.items()}
 
+def sample_bits(B: int, cfg: Dict[str, Any], device: torch.device) -> torch.Tensor:
+    nbits = int(cfg["model"]["nbits"])
+    train_cfg = cfg.get("train", {}) or {}
+
+    fixed_bits = train_cfg.get("fixed_bits", None)
+    codebook = train_cfg.get("codebook", None)
+
+    if fixed_bits is not None:
+        fb = torch.tensor([fixed_bits], device=device, dtype=torch.float32)
+        assert fb.shape[1] == nbits
+        return fb.repeat(B, 1)
+
+    if codebook is not None:
+        cb = torch.tensor(codebook, device=device, dtype=torch.float32)  # [K, nbits]
+        idx = torch.randint(0, cb.shape[0], (B,), device=device)
+        return cb[idx]
+
+    return torch.randint(0, 2, (B, nbits), device=device, dtype=torch.float32)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -322,8 +340,7 @@ def main() -> None:
 
             x = batch["audio"].to(device, non_blocking=True)
             B = x.shape[0]
-            bits = torch.randint(0, 2, (B, int(cfg["model"]["nbits"])), device=device, dtype=torch.float32)
-
+            bits = sample_bits(B, cfg, device)
             y_clean, mask = embed_batch(
                 x=x,
                 bits=bits,

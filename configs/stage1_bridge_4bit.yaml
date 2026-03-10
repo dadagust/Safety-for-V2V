@@ -1,0 +1,79 @@
+seed: 1337
+
+audio:
+  sample_rate: 16000
+  segment_seconds: 2.0
+  watermark_seconds: 2.0
+
+embed:
+  mode: full
+
+latency_train:
+  enable: false
+
+model:
+  nbits: 4
+  msg_dim: 128
+  enc_hidden: 128
+  enc_kernel_size: 7
+  enc_dilations: [1, 2, 4, 8, 16, 32, 64]
+  enc_groups: 8
+  enc_dropout: 0.0
+
+  det_channels: [64, 128, 256, 256]
+  det_kernel_size: 9
+  det_strides: [2, 2, 2, 2]
+  det_groups: 8
+  det_dropout: 0.0
+  bit_mlp_hidden: 256
+
+  max_delta: 0.25
+
+train:
+  batch_size: 8
+  num_workers: 2
+  lr: 0.001
+  weight_decay: 0.0
+  epochs: 8
+  steps_per_epoch: 1000
+  p_watermark: 1.0
+  grad_clip: 1.0
+  amp: false
+  log_every: 50
+  ckpt_dir: checkpoints_stage1_bridge_4bit
+  save_every_steps: 500
+
+loss:
+  presence_weight: 0.0
+  bit_weight: 1.0
+  stft_weight: 0.0
+  l2_weight: 0.0
+  balance_presence: false
+  stft_scales:
+    - {n_fft: 512, hop: 128, win: 512}
+
+attacks_train:
+  noise_snr_db: [100, 100]
+  gain_db: [0, 0]
+  resample_factor: [1.0, 1.0]
+  lowpass_hz: [8000, 8000]
+  highpass_hz: [20, 20]
+  crop_seconds: [0.0, 0.0]
+  p_lowpass: 0.0
+  p_highpass: 0.0
+
+attacks_eval:
+  mp3_bitrates_k: [32, 64, 128]
+  aac_bitrates_k: [48, 96, 192]
+  noise_snr_db_list: [20, 10, 5]
+  resample_factor_list: [0.85, 0.9, 1.1, 1.2]
+  lowpass_hz_list: [3000, 6000]
+  crop_seconds_list: [0.5, 1.0]
+  bitdepth_list: [8, 12]
+
+latency_probe:
+  chunk_seconds: [0.25, 0.5, 1.0, 2.0]
+
+detection:
+  presence_threshold: 0.5
+  min_positive_fraction: 0.05
