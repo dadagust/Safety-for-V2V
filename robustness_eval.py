@@ -3,13 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 import yaml
 
@@ -18,102 +16,86 @@ from watermark.attacks import (
     add_noise_snr_np,
     bitdepth_reduce_np,
     crop_pad_np,
-    gain_np,
     lowpass_np,
     mp3_roundtrip_np,
     resample_speed_np,
 )
 from watermark.data import load_audio
-from watermark.model import Encoder1D, Detector1D, WatermarkNet
+from watermark.runtime import (
+    build_model_from_cfg,
+    detector_forward_with_predicted_mask,
+    embed_batch,
+    present_from_presence_logits,
+)
 
 
-def load_config(path: str) -> Dict:
+def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def load_model(cfg: Dict, checkpoint_path: str, device: torch.device) -> WatermarkNet:
-    enc = Encoder1D(
-        nbits=int(cfg["model"]["nbits"]),
-        msg_dim=int(cfg["model"]["msg_dim"]),
-        hidden=int(cfg["model"]["enc_hidden"]),
-        max_delta=float(cfg["model"]["max_delta"]),
-    )
-    det = Detector1D(
-        nbits=int(cfg["model"]["nbits"]),
-        channels=list(cfg["model"]["det_channels"]),
-        kernel_size=int(cfg["model"]["det_kernel_size"]),
-        strides=list(cfg["model"]["det_strides"]),
-    )
-    model = WatermarkNet(enc, det).to(device)
+def load_model(cfg: Dict[str, Any], checkpoint_path: str, device: torch.device):
+    model = build_model_from_cfg(cfg, device=device)
     ckpt = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=True)
     model.eval()
     return model
 
 
 def read_manifest_paths(manifest_csv: str) -> List[str]:
-    import csv
     with open(manifest_csv, "r", newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
         return [row["path"] for row in r]
 
 
+def resolve_embed_mode(cfg: Dict[str, Any], arg_mode: str) -> str:
+    if arg_mode != "auto":
+        return arg_mode
+    mode = str((cfg.get("embed", {}) or {}).get("mode", "window")).lower()
+    if mode in ("full", "window", "dropout", "dropout_holes", "holes"):
+        return "dropout" if mode in ("dropout_holes", "holes") else mode
+    return "window"
+
+
 def detect_and_decode(
-    detector: Detector1D,
+    detector,
     audio_t: torch.Tensor,
     presence_threshold: float,
     min_positive_fraction: float,
+    use_soft_mask: bool,
 ) -> Tuple[bool, torch.Tensor, float]:
-    """
-    audio_t: [1,1,T]
-    Returns: (present?, decoded_bits_logits_avg [nbits], presence_score)
-    """
     with torch.no_grad():
-        presence_logits, bit_logits = detector(audio_t)  # [1,T'], [1,nbits,T']
-        prob = torch.sigmoid(presence_logits)[0]  # [T']
-        present = (prob > presence_threshold).float().mean().item() > min_positive_fraction
+        presence_logits, bit_logits, _weights = detector_forward_with_predicted_mask(
+            detector,
+            audio_t,
+            threshold=presence_threshold,
+            use_soft_mask=use_soft_mask,
+        )
+        prob = torch.sigmoid(presence_logits)[0]
+        present = bool(present_from_presence_logits(presence_logits, presence_threshold, min_positive_fraction)[0].item())
         presence_score = float(prob.max().item())
-
-        if present:
-            w = (prob > presence_threshold).float()
-            if w.sum().item() < 1.0:
-                # fallback: use top-k frames
-                k = max(1, int(0.1 * w.numel()))
-                topk = torch.topk(prob, k).indices
-                w = torch.zeros_like(prob)
-                w[topk] = 1.0
-            avg = (bit_logits[0] * w.unsqueeze(0)).sum(dim=-1) / w.sum().clamp_min(1.0)  # [nbits]
-        else:
-            avg = bit_logits[0].mean(dim=-1)  # [nbits], arbitrary
-        return present, avg, presence_score
+        return present, bit_logits[0], presence_score
 
 
-def build_attack_cases(cfg: Dict, sr: int) -> List[Tuple[str, Callable[[np.ndarray], np.ndarray]]]:
+def build_attack_cases(cfg: Dict[str, Any], sr: int) -> List[Tuple[str, Callable[[np.ndarray], np.ndarray]]]:
     cases: List[Tuple[str, Callable[[np.ndarray], np.ndarray]]] = []
     cases.append(("clean", lambda x: x))
 
-    # noise
     for snr in cfg["attacks_eval"]["noise_snr_db_list"]:
         cases.append((f"noise_snr{snr}", lambda x, snr=snr: add_noise_snr_np(x, float(snr))))
 
-    # speed
     for f in cfg["attacks_eval"]["resample_factor_list"]:
         cases.append((f"speed_{f}", lambda x, f=f: resample_speed_np(x, float(f), sr)))
 
-    # lowpass
     for c in cfg["attacks_eval"]["lowpass_hz_list"]:
         cases.append((f"lowpass_{c}", lambda x, c=c: lowpass_np(x, sr, float(c))))
 
-    # crop
     for cs in cfg["attacks_eval"]["crop_seconds_list"]:
         cases.append((f"crop_{cs}s", lambda x, cs=cs: crop_pad_np(x, float(cs), sr)))
 
-    # bitdepth
     for b in cfg["attacks_eval"]["bitdepth_list"]:
         cases.append((f"bitdepth_{b}", lambda x, b=b: bitdepth_reduce_np(x, int(b))))
 
-    # codecs
     for br in cfg["attacks_eval"]["mp3_bitrates_k"]:
         cases.append((f"mp3_{br}k", lambda x, br=br: mp3_roundtrip_np(x, sr, int(br))))
     for br in cfg["attacks_eval"]["aac_bitrates_k"]:
@@ -122,24 +104,31 @@ def build_attack_cases(cfg: Dict, sr: int) -> List[Tuple[str, Callable[[np.ndarr
     return cases
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, required=True)
     ap.add_argument("--checkpoint", type=str, required=True)
     ap.add_argument("--manifest", type=str, required=True)
     ap.add_argument("--out", type=str, required=True)
-    ap.add_argument("--max_items", type=int, default=200, help="Limit items for speed (esp. mp3/aac). 0 = all.")
+    ap.add_argument("--max_items", type=int, default=200, help="Limit items for speed. 0 = all.")
     ap.add_argument("--latency", action="store_true", help="Also compute detection/msg accuracy vs chunk duration.")
+    ap.add_argument("--embed_mode", type=str, default="auto", choices=["auto", "full", "window", "dropout"])
+    ap.add_argument("--use_hard_mask", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
+        torch.set_num_threads(1)
     sr = int(cfg["audio"]["sample_rate"])
     seg_len = int(round(cfg["audio"]["segment_seconds"] * sr))
+    wm_len = int(round(float(cfg["audio"]["watermark_seconds"]) * sr))
 
     model = load_model(cfg, args.checkpoint, device)
     presence_thr = float(cfg["detection"]["presence_threshold"])
     min_frac = float(cfg["detection"]["min_positive_fraction"])
+    use_soft_mask = not args.use_hard_mask
+    embed_mode = resolve_embed_mode(cfg, args.embed_mode)
 
     paths = read_manifest_paths(args.manifest)
     if args.max_items and args.max_items > 0:
@@ -148,7 +137,6 @@ def main():
     attack_cases = build_attack_cases(cfg, sr)
     chunk_secs = list(cfg["latency_probe"]["chunk_seconds"])
 
-    # accumulators per attack
     stats = {}
     for name, _fn in attack_cases:
         stats[name] = {
@@ -171,35 +159,36 @@ def main():
         else:
             x_np = x_np[:seg_len]
 
-        # tensors
         x = torch.from_numpy(x_np).to(device).view(1, 1, -1)
-
         bits = torch.randint(0, 2, (1, nbits), device=device, dtype=torch.float32)
 
-        # watermark entire segment
         with torch.no_grad():
-            y, _ = model.encoder(x, bits)
+            y, mask = embed_batch(
+                x=x,
+                bits=bits,
+                model=model,
+                cfg=cfg,
+                sample_rate=sr,
+                watermark_len=wm_len,
+                p_embed=1.0,
+                embed_mode_override=embed_mode,
+            )
         y_np = y.detach().cpu().numpy().reshape(-1).astype(np.float32)
-
-        # negative example: original audio
-        x0_np = x_np
+        x0_np = x_np.astype(np.float32)
 
         for name, fn in attack_cases:
             try:
                 y_att_pos = fn(y_np)
                 y_att_neg = fn(x0_np)
             except subprocess.CalledProcessError:
-                # ffmpeg failed; skip this case for this file
                 continue
 
-            # run detector
             y_pos_t = torch.from_numpy(y_att_pos).to(device).view(1, 1, -1)
             y_neg_t = torch.from_numpy(y_att_neg).to(device).view(1, 1, -1)
 
-            pos_present, pos_bits_logits, _ = detect_and_decode(model.detector, y_pos_t, presence_thr, min_frac)
-            neg_present, _neg_bits_logits, _ = detect_and_decode(model.detector, y_neg_t, presence_thr, min_frac)
+            pos_present, pos_bits_logits, _ = detect_and_decode(model.detector, y_pos_t, presence_thr, min_frac, use_soft_mask)
+            neg_present, _neg_bits_logits, _ = detect_and_decode(model.detector, y_neg_t, presence_thr, min_frac, use_soft_mask)
 
-            # update confusion
             if pos_present:
                 stats[name]["tp"] += 1
             else:
@@ -210,28 +199,25 @@ def main():
             else:
                 stats[name]["tn"] += 1
 
-            # bits only if detected positive
             if pos_present:
-                pred_bits = (pos_bits_logits > 0).float()
+                pred_bits = (torch.sigmoid(pos_bits_logits) >= 0.5).float()
                 stats[name]["bit_correct"] += int((pred_bits == bits[0]).sum().item())
                 stats[name]["bit_total"] += nbits
                 stats[name]["msg_correct"] += int(bool(torch.all(pred_bits == bits[0]).item()))
                 stats[name]["msg_total"] += 1
 
-            # latency probe
             if args.latency:
                 for cs in chunk_secs:
                     Tchunk = max(64, int(round(float(cs) * sr)))
                     y_chunk = y_att_pos[:Tchunk]
                     y_chunk_t = torch.from_numpy(y_chunk).to(device).view(1, 1, -1)
-                    present_c, bits_logits_c, _ = detect_and_decode(model.detector, y_chunk_t, presence_thr, min_frac)
+                    present_c, bits_logits_c, _ = detect_and_decode(model.detector, y_chunk_t, presence_thr, min_frac, use_soft_mask)
                     if present_c:
                         stats[name][f"tp@{cs}s"] += 1
-                        pred_bits_c = (bits_logits_c > 0).float()
+                        pred_bits_c = (torch.sigmoid(bits_logits_c) >= 0.5).float()
                         stats[name][f"msg_correct@{cs}s"] += int(bool(torch.all(pred_bits_c == bits[0]).item()))
                     stats[name][f"msg_total@{cs}s"] += 1
 
-    # write CSV
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -253,11 +239,10 @@ def main():
         }
         if args.latency:
             for cs in chunk_secs:
-                row[f"TPR@{cs}s"] = s[f"tp@{cs}s"] / max(s["tp"] + s["fn"], 1)  # relative to total positives attempted
+                row[f"TPR@{cs}s"] = s[f"tp@{cs}s"] / max(s["tp"] + s["fn"], 1)
                 row[f"msg_acc@{cs}s"] = s[f"msg_correct@{cs}s"] / max(s[f"msg_total@{cs}s"], 1)
         rows.append(row)
 
-    # stable header
     fieldnames = list(rows[0].keys()) if rows else []
     with out_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)

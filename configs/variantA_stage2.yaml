@@ -3,61 +3,67 @@ seed: 1337
 audio:
   sample_rate: 16000
   segment_seconds: 4.0
-  watermark_seconds: 2.0
+  watermark_seconds: 4.0
 
 embed:
   mode: dropout
-  ensure_prefix_seconds: 0.5
-  num_holes: [0, 4]
-  hole_seconds: [0.25, 1.25]
+  ensure_prefix_seconds: 1.5
+  num_holes: [0, 1]
+  hole_seconds: [0.15, 0.40]
   ramp_ms: 10.0
 
 latency_train:
-  enable: true
-  weight: 0.5
-  p_apply: 0.7
-  chunk_seconds: [0.25, 0.5, 1.0]
+  enable: false
 
 model:
   nbits: 16
-  msg_dim: 64
+  msg_dim: 128
   enc_hidden: 128
+  enc_kernel_size: 7
+  enc_dilations: [1, 2, 4, 8, 16, 32, 64]
+  enc_groups: 8
+  enc_dropout: 0.0
   det_channels: [64, 128, 256, 256]
   det_kernel_size: 9
   det_strides: [2, 2, 2, 2]
-  max_delta: 0.05
+  det_groups: 8
+  det_dropout: 0.0
+  bit_mlp_hidden: 256
+  max_delta: 0.07
 
 train:
   batch_size: 8
   num_workers: 2
   lr: 0.00015
+  weight_decay: 0.0001
   epochs: 8
-  steps_per_epoch: 2000
-  p_watermark: 0.5
+  steps_per_epoch: 1500
+  p_watermark: 0.85
   grad_clip: 1.0
+  amp: true
   log_every: 50
-  ckpt_dir: checkpoints
+  ckpt_dir: checkpoints_stage2
   save_every_steps: 500
 
 loss:
   presence_weight: 1.0
-  bit_weight: 2.0
-  stft_weight: 0.25
-  l2_weight: 0.10
+  bit_weight: 3.0
+  stft_weight: 0.08
+  l2_weight: 0.03
+  balance_presence: true
   stft_scales:
     - {n_fft: 512, hop: 128, win: 512}
     - {n_fft: 1024, hop: 256, win: 1024}
 
-# Stage 2: add time-warp (speed/crop) and slightly stronger noise
 attacks_train:
-  noise_snr_db: [18, 40]
-  gain_db: [-6, 6]
-  resample_factor: [0.95, 1.05]
-  lowpass_hz: [3000, 8000]
-  highpass_hz: [20, 300]
-  crop_seconds: [0.0, 0.15]
-  p_lowpass: 0.6
-  p_highpass: 0.3
+  noise_snr_db: [30, 45]
+  gain_db: [-2, 2]
+  resample_factor: [1.0, 1.0]
+  lowpass_hz: [4500, 8000]
+  highpass_hz: [20, 120]
+  crop_seconds: [0.0, 0.0]
+  p_lowpass: 0.3
+  p_highpass: 0.2
 
 attacks_eval:
   mp3_bitrates_k: [32, 64, 128]

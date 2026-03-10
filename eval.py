@@ -1,55 +1,48 @@
 from __future__ import annotations
 
 import argparse
-import random
-from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
 
 from watermark.attacks import DifferentiableAttacks, TrainAttackConfig
 from watermark.data import AudioManifestDataset
-from watermark.embed import embed_full, embed_random_window, embed_dropout_holes
-from watermark.model import Encoder1D, Detector1D, WatermarkNet
+from watermark.runtime import (
+    build_model_from_cfg,
+    detector_forward_with_predicted_mask,
+    downsample_mask,
+    embed_batch,
+    predicted_binary_mask,
+    present_from_presence_logits,
+)
 
 
-def load_config(path: str) -> Dict:
+def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-def load_model(cfg: Dict, checkpoint_path: str, device: torch.device) -> WatermarkNet:
-    enc = Encoder1D(
-        nbits=int(cfg["model"]["nbits"]),
-        msg_dim=int(cfg["model"]["msg_dim"]),
-        hidden=int(cfg["model"]["enc_hidden"]),
-        max_delta=float(cfg["model"]["max_delta"]),
-    )
-    det = Detector1D(
-        nbits=int(cfg["model"]["nbits"]),
-        channels=list(cfg["model"]["det_channels"]),
-        kernel_size=int(cfg["model"]["det_kernel_size"]),
-        strides=list(cfg["model"]["det_strides"]),
-    )
-    model = WatermarkNet(enc, det).to(device)
+def load_model(cfg: Dict[str, Any], checkpoint_path: str, device: torch.device):
+    model = build_model_from_cfg(cfg, device=device)
     ckpt = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=True)
     model.eval()
     return model
 
 
-@torch.no_grad()
-def downsample_mask(mask: torch.Tensor, target_len: int) -> torch.Tensor:
-    m = F.interpolate(mask, size=target_len, mode="linear", align_corners=False)
-    return m.squeeze(1).clamp(0.0, 1.0)
+def resolve_embed_mode(cfg: Dict[str, Any], arg_mode: str) -> str:
+    if arg_mode != "auto":
+        return arg_mode
+    mode = str((cfg.get("embed", {}) or {}).get("mode", "window")).lower()
+    if mode in ("full", "window", "dropout", "dropout_holes", "holes"):
+        return "dropout" if mode in ("dropout_holes", "holes") else mode
+    return "window"
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, required=True)
     ap.add_argument("--checkpoint", type=str, required=True)
@@ -59,16 +52,20 @@ def main():
     ap.add_argument(
         "--embed_mode",
         type=str,
-        default="full",
-        choices=["full", "window", "dropout"],
-        help="How to embed positives for evaluation. 'dropout' produces a localized presence mask.",
+        default="auto",
+        choices=["auto", "full", "window", "dropout"],
+        help="How to embed positives for evaluation. 'auto' follows the config.",
     )
+    ap.add_argument("--use_hard_mask", action="store_true", help="Decode bits with thresholded predicted mask instead of soft weights")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
+        torch.set_num_threads(1)
 
     sr = int(cfg["audio"]["sample_rate"])
+    wm_len = int(round(float(cfg["audio"]["watermark_seconds"]) * sr))
     ds = AudioManifestDataset(args.manifest, sample_rate=sr, segment_seconds=cfg["audio"]["segment_seconds"], random_crop=False)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=False)
 
@@ -81,8 +78,8 @@ def main():
 
     thr = float(cfg["detection"]["presence_threshold"])
     min_frac = float(cfg["detection"]["min_positive_fraction"])
+    embed_mode = resolve_embed_mode(cfg, args.embed_mode)
 
-    # metrics
     tp = fp = tn = fn = 0
     bit_correct = 0
     bit_total = 0
@@ -97,55 +94,34 @@ def main():
         x = batch["audio"].to(device)
         B = x.shape[0]
         nbits = int(cfg["model"]["nbits"])
-
         bits = torch.randint(0, 2, (B, nbits), device=device, dtype=torch.float32)
 
-        # half positive / half negative
-        do_embed = torch.rand((B,), device=device) < 0.5
-
-        if args.embed_mode == "full":
-            y_clean, mask = embed_full(x, bits, model.encoder, do_embed)
-        elif args.embed_mode == "window":
-            # embed a single window; choose 2s by default (from config) and start randomly
-            wm_len = int(round(float(cfg["audio"].get("watermark_seconds", 2.0)) * sr))
-            y_clean, mask = embed_random_window(
-                x=x,
-                bits=bits,
-                encoder=model.encoder,
-                watermark_len=wm_len,
-                p_embed=0.5,
-                start_mode=str((cfg.get("embed", {}) or {}).get("start_mode", "random")),
-            )
-        else:  # dropout
-            e = cfg.get("embed", {}) or {}
-            nh = e.get("num_holes", (0, 3))
-            hs = e.get("hole_seconds", (0.25, 1.0))
-            y_clean, mask = embed_dropout_holes(
-                x=x,
-                bits=bits,
-                encoder=model.encoder,
-                sample_rate=sr,
-                p_embed=0.5,
-                ensure_prefix_seconds=float(e.get("ensure_prefix_seconds", 0.5)),
-                num_holes=(int(nh[0]), int(nh[1])),
-                hole_seconds=(float(hs[0]), float(hs[1])),
-                ramp_ms=float(e.get("ramp_ms", 10.0)),
-            )
+        y_clean, mask = embed_batch(
+            x=x,
+            bits=bits,
+            model=model,
+            cfg=cfg,
+            sample_rate=sr,
+            watermark_len=wm_len,
+            p_embed=0.5,
+            embed_mode_override=embed_mode,
+        )
         if attacks is None:
             y = y_clean
         else:
             y, _ = attacks(y_clean, None)
 
-        presence_logits, bit_logits = model.detector(y)
-        Tp = presence_logits.shape[1]
-        mask_ds = downsample_mask(mask, Tp)  # [B,T']
-        # present if *any* watermark frames exist
-        gt_present = (mask_ds.max(dim=-1).values > 0.5)  # [B] bool
+        presence_logits, bit_logits, _weights = detector_forward_with_predicted_mask(
+            model.detector,
+            y,
+            threshold=thr,
+            use_soft_mask=not args.use_hard_mask,
+        )
+        Tp = presence_logits.shape[-1]
+        mask_ds = downsample_mask(mask, Tp)
+        gt_present = (mask_ds.max(dim=-1).values > 0.5)
+        pred_present = present_from_presence_logits(presence_logits, threshold=thr, min_positive_fraction=min_frac)
 
-        prob = torch.sigmoid(presence_logits)  # [B,T']
-        pred_present = (prob > thr).float().mean(dim=-1) > min_frac  # [B] bool
-
-        # confusion matrix
         for b in range(B):
             gt = bool(gt_present[b].item())
             pr = bool(pred_present[b].item())
@@ -155,15 +131,12 @@ def main():
                 fp += 1
             elif (not gt) and (not pr):
                 tn += 1
-            elif gt and (not pr):
+            else:
                 fn += 1
 
-        # localization metrics (only meaningful when mask is not full/constant)
-        if args.embed_mode in ("window", "dropout"):
-            # frame-level binary masks
+        if embed_mode in ("window", "dropout"):
             gt_m = (mask_ds > 0.5).float()
-            pr_m = (prob > thr).float()
-            # only score samples that contain watermark in GT
+            pr_m = predicted_binary_mask(presence_logits, threshold=thr)
             for b in range(B):
                 if gt_m[b].sum().item() < 1.0:
                     continue
@@ -179,28 +152,21 @@ def main():
                 loc_f1_sum += float(f1)
                 loc_n += 1
 
-        # bit metrics on positives that were detected
+        pred_bits = (torch.sigmoid(bit_logits) >= 0.5).float()
         for b in range(B):
             if not bool(gt_present[b].item()):
                 continue
             if not bool(pred_present[b].item()):
                 continue
-
-            w = (prob[b] > thr).float()  # [T']
-            if w.sum().item() < 1.0:
-                w = mask_ds[b]  # fallback
-            avg = (bit_logits[b] * w.unsqueeze(0)).sum(dim=-1) / w.sum().clamp_min(1.0)
-            pred_bits = (avg > 0).float()
-
-            bit_correct += int((pred_bits == bits[b]).sum().item())
+            bit_correct += int((pred_bits[b] == bits[b]).sum().item())
             bit_total += nbits
-            msg_correct += int(bool(torch.all(pred_bits == bits[b]).item()))
+            msg_correct += int(bool(torch.all(pred_bits[b] == bits[b]).item()))
             msg_total += 1
 
         tpr = tp / max(tp + fn, 1)
         fpr = fp / max(fp + tn, 1)
         postfix = {"TPR": f"{tpr:.3f}", "FPR": f"{fpr:.3f}", "msg_acc": f"{(msg_correct/max(msg_total,1)):.3f}"}
-        if args.embed_mode in ("window", "dropout") and loc_n > 0:
+        if embed_mode in ("window", "dropout") and loc_n > 0:
             postfix["loc_iou"] = f"{(loc_iou_sum/loc_n):.3f}"
             postfix["loc_f1"] = f"{(loc_f1_sum/loc_n):.3f}"
         pbar.set_postfix(postfix)
@@ -215,7 +181,7 @@ def main():
     print(f"TPR={tpr:.4f} FPR={fpr:.4f}")
     print(f"Bit accuracy (detected positives) = {bit_acc:.4f}")
     print(f"Message accuracy (all bits correct) = {msg_acc:.4f}")
-    if args.embed_mode in ("window", "dropout"):
+    if embed_mode in ("window", "dropout"):
         if loc_n > 0:
             print(f"Localization IoU (avg over positive samples) = {loc_iou_sum/loc_n:.4f}")
             print(f"Localization F1  (avg over positive samples) = {loc_f1_sum/loc_n:.4f}")
