@@ -1,9 +1,10 @@
+
 % chapters/chapter3.tex
 
 \chapter{Methodology}\label{chap:methodology}
 
 \section{Chapter Overview and Current Scope}
-This chapter describes the methodology implemented in the current prototype. The experimental pipeline is centered on the \textbf{assistant-output watermarking branch}, whose objective is to train a localized audio watermark that can be detected reliably, decoded with a low false-positive rate, and recovered from short audio prefixes. Accordingly, the methodology presented in this chapter focuses on the design, training, and evaluation of the watermarking system as the core implemented component of the prototype. The user-side deepfake and replay detector is not included in the present experimental setup and is therefore left for future work.
+This chapter describes the methodology implemented in the current prototype. The experimental pipeline is centered on the \textbf{assistant-output watermarking branch}, whose objective is to train a localized audio watermark that can be detected reliably, decoded with a low false-positive rate, and recovered from short audio prefixes. In more concrete terms, the implemented work in this thesis is \textbf{assistant-output watermarking with localized, low-latency detection on LibriSpeech}. Accordingly, the methodology presented in this chapter focuses on the design, training, and evaluation of the watermarking system as the core implemented component of the prototype. The user-side deepfake and replay detector is \textbf{not} included in the present experimental setup and is therefore left for future work.
 
 The implemented system is a curriculum-trained, time-domain watermarking pipeline for 16~kHz speech. The core design goal is not only to embed a detectable watermark, but also to make the detector \textbf{localized} and \textbf{low-latency}. In other words, the detector should answer two questions:
 \begin{enumerate}[leftmargin=1.25em]
@@ -195,7 +196,7 @@ The best checkpoint is selected using clean validation bit accuracy.
 In the reported stable stages, training-time attacks were intentionally kept weak or disabled. This was a pragmatic decision: first solve localization and latency, then gradually introduce stronger robustness constraints. For stage~3 and stage~4, the current configs keep noise, gain, and resampling effectively neutral during training.
 
 \subsection{Evaluation-time attacks}
-Robustness is measured with a dedicated evaluation script that applies a fixed attack suite outside the differentiable training graph. The current evaluation includes:
+Robustness is measured with a dedicated evaluation script that applies a fixed attack suite outside the differentiable training graph. The current evaluation is intentionally \textbf{narrower than a full real-world channel benchmark}: it is performed on LibriSpeech speech only and includes the following black-box transformations:
 \begin{itemize}[leftmargin=1.25em]
   \item additive noise,
   \item speed/resampling perturbation,
@@ -205,6 +206,8 @@ Robustness is measured with a dedicated evaluation script that applies a fixed a
   \item MP3 round-trip,
   \item AAC round-trip.
 \end{itemize}
+Notably, the current implementation does \emph{not} yet include a separate VoIP benchmark, speaker--microphone re-recording study, or room-acoustics benchmark. Those broader channel tests belong to future work.
+
 For each attack, the evaluation runs both positive and negative trials. Positive trials apply the attack to a watermarked segment. Negative trials apply the same attack to the clean segment. This allows the system to report both true positives and false positives under the same channel transformation.
 
 \subsection{Metrics}
@@ -216,9 +219,9 @@ The implemented evaluation reports the following metrics:
   \item \textbf{localization IoU/F1}: alignment of the predicted watermark mask with the ground-truth mask,
   \item \textbf{prefix metrics}: TPR and message accuracy at 0.25~s, 0.5~s, 1.0~s, and 2.0~s.
 \end{itemize}
-The prefix metrics are particularly important for the thesis claim about low-latency verification.
+The prefix metrics are particularly important for the thesis claim about low-latency verification. However, these metrics should be interpreted as \textbf{watermark-prefix latency} only; they are not a measurement of full conversational-pipeline latency.
 
-\section{Empirical Results Achieved So Far}
+\section{Empirical Results and Mapping to Research Questions}
 \subsection{Stage 3: localized 4-bit watermark}
 The stage~3 checkpoint established that the system can be both highly accurate and localized. On clean evaluation, the model achieved:
 \begin{itemize}[leftmargin=1.25em]
@@ -229,7 +232,7 @@ The stage~3 checkpoint established that the system can be both highly accurate a
   \item localization IoU = 0.9990,
   \item localization F1 = 0.9995.
 \end{itemize}
-These results show that stage~3 already solved the main localization problem while keeping false positives low.
+These results primarily support \textbf{RQ2} and \textbf{RQ3}: before any explicit latency fine-tuning, the watermark can already be detected very reliably on LibriSpeech, and the localization head is able to recover the watermark region with near-perfect overlap.
 
 \subsection{Stage 4: latency-focused fine-tuning}
 Stage~4 was designed to improve \emph{how early} the payload can be recovered from the audio stream. It succeeded. According to the current short technical report, stage~4 preserved strong full-length performance while dramatically improving short-prefix decoding:\footnote{These stage~3/stage~4 summary numbers are taken from the uploaded short technical report and were used as the current external summary of the system.}
@@ -251,7 +254,7 @@ False-positive rate & 0.010 & 0.010 \\
 \end{tabular}
 \end{table}
 
-This is the central result of the current implementation: stage~4 retains a very strong detector while making the payload decodable far earlier in the utterance.
+These stage~4 prefix metrics are the clearest empirical evidence for \textbf{RQ3}: they show that the payload often becomes decodable well before the full utterance finishes. They also \textbf{partially answer RQ4}, because short-prefix verification is an important ingredient for future middleware integration. However, they still do \emph{not} measure the latency of a full V2V pipeline that would also include ASR, TTS, networking, orchestration, and a user-side detector branch.
 
 \subsection{Additional robustness findings}
 The current stage~4 robustness CSV shows the following tendencies:
@@ -261,16 +264,16 @@ The current stage~4 robustness CSV shows the following tendencies:
   \item under AAC compression, performance is noticeably worse and remains a clear weakness of the current model;
   \item moderate speed perturbations are survivable, but still more challenging than noise or low-pass filtering.
 \end{itemize}
-In other words, the current model is already strong against several common manipulations, but codec robustness is not yet uniform across all formats.
+These attacked-condition results are the main evidence for \textbf{RQ2} \emph{within the implemented benchmark}. In other words, the thesis can claim robustness only for the specific LibriSpeech-based attack suite that was actually run, not for broader VoIP, room-acoustics, or user-side spoofing scenarios.
 
-\subsection{What the current results support}
-Based on the implemented experiments, the thesis can already make the following claims:
-\begin{enumerate}[leftmargin=1.25em]
-  \item the watermark detector can achieve very low false-positive rate together with perfect or near-perfect true-positive rate on LibriSpeech test segments;
-  \item localized watermarking can be learned reliably in a waveform-domain model;
-  \item a curriculum that explicitly optimizes short prefixes can improve low-latency payload recovery by a large margin;
-  \item this latency gain does not require sacrificing the detector into a trivial always-positive solution.
-\end{enumerate}
+\subsection{Direct status of RQ1--RQ4}
+The results can now be mapped back to the research questions explicitly:
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{RQ1 (Perceptual impact): partially answered.} The prototype is already a strong \emph{functional} watermark, but formal MOS/A--B listening tests were not run, and the latency-optimized checkpoint still shows noticeable perturbation energy. Thus, the thesis can claim only that perceptual refinement remains an open next step.
+  \item \textbf{RQ2 (Robustness on LibriSpeech attack suite): answered within scope.} The watermark survives several implemented black-box transformations (noise, low-pass, crop-pad, bit-depth, and MP3) with high detectability, while AAC and some speed perturbations remain weaker points.
+  \item \textbf{RQ3 (Localized, low-latency detection): answered within scope.} Stage~3 demonstrates strong localization, and stage~4 shows a substantial improvement in short-prefix payload recovery without collapsing into a trivial always-positive detector.
+  \item \textbf{RQ4 (Integration status): only partially answered.} The thesis measures watermark-prefix verification behavior, which is relevant to streaming deployment, but it does \emph{not} report full end-to-end latency of a complete watermark + user-side detector middleware. Therefore, RQ4 must be treated as a partial systems-level conclusion rather than a fully answered experimental claim.
+\end{itemize}
 
 \section{Qualitative Audio Inspection and Demo Examples}
 To complement aggregate metrics, the implementation includes a script that selects random files from a manifest, applies the watermark, saves both the original and watermarked waveforms, and runs inference on both versions. This produces a practical demo bundle containing:
@@ -285,7 +288,7 @@ To complement aggregate metrics, the implementation includes a script that selec
 \end{itemize}
 The uploaded stage~4 demo report indicates that on five randomly sampled files, every clean example was classified as \emph{not watermarked}, while every watermarked example was classified as \emph{watermarked} and decoded with 100\% payload accuracy. This is a strong qualitative confirmation that the detector behaves correctly on individual samples.
 
-However, the same demo also revealed a remaining limitation: the average absolute perturbation was still large (approximately 0.16--0.18), and the maximum perturbation reached the configured ceiling of 0.18. Therefore, the current latency-optimized checkpoint is best interpreted as a \textbf{strong functional watermark}, not yet as a fully imperceptible watermark. The next engineering step is to preserve as much of the current detector/payload performance as possible while reducing audible distortion.
+However, the same demo also revealed a remaining limitation: the average absolute perturbation was still large (approximately 0.16--0.18), and the maximum perturbation reached the configured ceiling of 0.18. Therefore, the current latency-optimized checkpoint is best interpreted as a \textbf{strong functional watermark}, not yet as a fully imperceptible watermark. This qualitative evidence is consistent with the \textbf{partial} status of RQ1 reported above.
 
 \section{Implementation Notes and Reproducibility}
 The current code base is organized around a small number of explicit components:
@@ -319,19 +322,29 @@ python robustness_eval.py \
 \end{lstlisting}
 
 \section{Current Limitations and Next Step}
-The current implementation has three important limitations.
+The current implementation has four important limitations.
 \begin{enumerate}[leftmargin=1.25em]
   \item It is still evaluated only on speech (LibriSpeech), not on a truly multi-domain audio corpus.
   \item The reported best checkpoint is optimized primarily for detection, localization, and low-latency payload recovery, not yet for imperceptibility.
   \item The user-side deepfake/replay detection branch remains outside the current implemented scope.
+  \item Full end-to-end V2V middleware latency is not measured; only watermark-prefix behavior is quantified.
 \end{enumerate}
 
-Therefore, the most appropriate next stage is a \emph{quality-oriented fine-tuning stage}: reduce \texttt{max\_delta}, add small STFT and $\ell_2$ penalties, and then measure the trade-off between audio quality and message recovery. From the perspective of the thesis, this is a useful and honest stopping point: the current system already demonstrates a localized, low-FPR, low-latency watermark, while the remaining work is primarily about perceptual refinement rather than about making the watermark function at all.
+Therefore, the most appropriate next stage is a \emph{quality-oriented fine-tuning stage}: reduce \texttt{max\_delta}, add small STFT and $\ell_2$ penalties, and then measure the trade-off between audio quality and message recovery. After that, the logical systems step is to implement the planned user-side detector branch and evaluate the combined middleware end-to-end. From the perspective of the thesis, this is a useful and honest stopping point: the current system already demonstrates a localized, low-FPR, low-latency assistant-output watermark, while the remaining work concerns perceptual refinement and full bilateral integration.
 
 \FloatBarrier
 
 \section*{References}
 \small
+\noindent [1] [15] (PDF) On the Security and Privacy Challenges of Virtual Assistants. \url{https://www.researchgate.net/publication/350413576_On_the_Security_and_Privacy_Challenges_of_Virtual_Assistants}\par
+\noindent [2] [6] [7] [8] [13] [17] [18] [38] [39] [40] [41] [42] [43] [44] [45] [48] [2308.14970] Audio Deepfake Detection: A Survey. \url{https://ar5iv.labs.arxiv.org/html/2308.14970}\par
+\noindent [3] [16] usenix.org. \url{https://www.usenix.org/system/files/usenixsecurity24-jiang-nan.pdf}\par
+\noindent [4] [5] [12] [23] [24] [29] [30] [31] [49] usenix.org. \url{https://www.usenix.org/system/files/usenixsecurity25-zong.pdf}\par
+\noindent [9] [11] [19] [20] [21] [22] Audio Watermarking Won’t Solve the Real Dangers of AI Voice Manipulation -- Center for Data Innovation. \url{https://datainnovation.org/2024/10/audio-watermarking-wont-solve-the-real-dangers-of-ai-voice-manipulation/}\par
+\noindent [10] [28] [35] [36] [37] [46] [47] [50] [51] [52] [53] [54] FakeMark: Deepfake Speech Attribution With Watermarked Artifacts. \url{https://arxiv.org/html/2510.12042v2}\par
+\noindent [14] Proactive Detection of Voice Cloning with Localized Watermarking. \url{https://ai.meta.com/research/publications/proactive-detection-of-voice-cloning-with-localized-watermarking/}\par
+\noindent [25] [26] [27] [2401.17264] Proactive Detection of Voice Cloning with Localized Watermarking. \url{https://arxiv.org/abs/2401.17264}\par
+\noindent [32] [33] [34] [2504.14832] Protecting Your Voice: Temporal-aware Robust Watermarking. \url{https://arxiv.org/abs/2504.14832}\par
 \noindent [55] SynthID --- Google DeepMind. \url{https://deepmind.google/models/synthid/}\par
 \noindent [56] Proactive Detection of Voice Cloning with Localized Watermarking (AudioSeal). \url{https://arxiv.org/abs/2401.17264}\par
 \noindent [57] AudioMarkBench: Benchmarking Robustness of Audio Watermarking. \url{https://arxiv.org/abs/2406.06979}\par
@@ -339,3 +352,4 @@ Therefore, the most appropriate next stage is a \emph{quality-oriented fine-tuni
 \noindent [70] ITU-T Rec. P.800.1: Mean Opinion Score (MOS) terminology. \url{https://www.itu.int/rec/dologin_pub.asp?id=T-REC-P.800.1-200303-S%21%21PDF-E&lang=e&type=items}\par
 \noindent [71] ITU-T Rec. P.862: Perceptual evaluation of speech quality (PESQ). \url{https://www.itu.int/rec/T-REC-P.862/}\par
 \noindent [72] Taal et al.\ (2011): Short-Time Objective Intelligibility (STOI). \url{https://sps.ewi.tudelft.nl/pubs/Taal2011_1.pdf}\par
+
