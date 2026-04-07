@@ -1,0 +1,341 @@
+% chapters/chapter3.tex
+
+\chapter{Methodology}\label{chap:methodology}
+
+\section{Chapter Overview and Current Scope}
+This chapter describes the methodology implemented in the current prototype. The experimental pipeline is centered on the \textbf{assistant-output watermarking branch}, whose objective is to train a localized audio watermark that can be detected reliably, decoded with a low false-positive rate, and recovered from short audio prefixes. Accordingly, the methodology presented in this chapter focuses on the design, training, and evaluation of the watermarking system as the core implemented component of the prototype. The user-side deepfake and replay detector is not included in the present experimental setup and is therefore left for future work.
+
+The implemented system is a curriculum-trained, time-domain watermarking pipeline for 16~kHz speech. The core design goal is not only to embed a detectable watermark, but also to make the detector \textbf{localized} and \textbf{low-latency}. In other words, the detector should answer two questions:
+\begin{enumerate}[leftmargin=1.25em]
+  \item is the watermark present at all? and
+  \item can the payload already be decoded from a short audio prefix?
+\end{enumerate}
+This makes the methodology operationally closer to real conversational systems, where a decision should ideally be made before the full utterance finishes playback.
+
+The current implementation follows a staged training strategy. Instead of training the final system end-to-end from scratch, we first teach the model to carry a very small payload, then calibrate detection on positive and negative examples, then introduce localization, and finally optimize short-prefix decoding. This curriculum was necessary in practice: direct training of a localized low-latency watermark with a larger payload was unstable in early experiments.
+
+\section{Experimental Data and Split Strategy}
+\subsection{Dataset actually used in the implemented system}
+Although the earlier methodology draft discussed a broad multi-domain corpus, the current implementation is trained and evaluated on \textbf{LibriSpeech} only. This choice was made to reduce experimental variance and to ensure a stable, reproducible speech-only benchmark during the development of the watermarking system. LibriSpeech provides read English speech at 16~kHz and an official partition into train, development, and test subsets~[58].
+
+In the current code base, file manifests are generated directly from the extracted LibriSpeech directory tree. The following manifests are used:
+\begin{itemize}[leftmargin=1.25em]
+  \item \texttt{manifests/librispeech\_train.csv},
+  \item \texttt{manifests/librispeech\_val.csv},
+  \item \texttt{manifests/librispeech\_test.csv}.
+\end{itemize}
+For faster curriculum experiments, reduced manifests are also created:
+\begin{itemize}[leftmargin=1.25em]
+  \item \texttt{manifests/train\_2k.csv} for a 2,000-file training subset,
+  \item \texttt{manifests/val\_200.csv} for a 200-file validation subset.
+\end{itemize}
+The reduced manifests are used during stage-based iteration, while the full LibriSpeech test manifest is used for final evaluation.
+
+\subsection{Preprocessing as implemented}
+The preprocessing pipeline is intentionally simple and matches the current code exactly:
+\begin{itemize}[leftmargin=1.25em]
+  \item audio is loaded from disk and converted to mono;
+  \item waveforms are clipped to the range $[-1,1]$ if necessary;
+  \item all signals are resampled to 16~kHz using polyphase resampling;
+  \item fixed-length segments are produced by cropping or zero-padding.
+\end{itemize}
+No separate RMS normalization or silence filtering is applied in the current implementation. During training, long files are sampled using \textbf{random crops}. During validation and testing, cropping is deterministic (the first fixed-length segment is used), which reduces evaluation noise and makes results reproducible.
+
+Two segment lengths are used in the curriculum:
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{2~s segments} for the bridge and detector-calibration stages,
+  \item \textbf{4~s segments} for the localized and latency-aware stages.
+\end{itemize}
+This choice mirrors the actual training progression in the current code base.
+
+\section{Watermarking Formulation}
+Let $x \in \mathbb{R}^{N}$ denote a clean waveform segment of length $N$ samples. The encoder receives $x$ and a binary payload $m \in \{0,1\}^{B}$ and produces a watermarked waveform
+\begin{equation}
+  y = \mathrm{clip}(x + \delta, -1, 1),
+\end{equation}
+where $\delta$ is a learned additive residual constrained by a maximum amplitude parameter \texttt{max\_delta}. In the current stable system, the payload size is \textbf{4 bits}. Earlier experiments with larger payloads were less stable, so the current chapter reports the best-performing 4-bit configuration.
+
+The detector processes an observed waveform $\tilde{y}$ and outputs:
+\begin{enumerate}[leftmargin=1.25em]
+  \item frame-level watermark-presence logits $\hat{p}_{1:F}$, and
+  \item payload logits $\hat{m} \in \mathbb{R}^{B}$.
+\end{enumerate}
+Unlike the earlier draft, the implemented detector does \emph{not} predict a full sequence of payload bits over time. Instead, it first extracts frame-level features, then pools them over the predicted or known watermark region, and finally predicts the payload from pooled statistics. This change was crucial for stable training.
+
+\subsection{Detection rule}
+The current inference rule is implemented as a threshold on the fraction of frames whose presence probability exceeds a scalar threshold $\tau$. Formally,
+\begin{equation}
+  \widehat{\mathrm{present}} = \mathbb{1}\!\left[\frac{1}{F}\sum_{f=1}^{F}\mathbb{1}\big(\sigma(\hat{p}_f) \ge \tau\big) > \rho\right],
+\end{equation}
+where $\sigma(\cdot)$ is the sigmoid function and $\rho$ is the minimum positive-frame fraction. In the released configs, $\tau=0.5$ and $\rho=0.05$.
+
+\subsection{Localization mask}
+When the watermark is not present over the full segment, the system maintains a binary mask $s \in \{0,1\}^{F}$ over detector frames. This mask indicates where the watermark is expected to exist. In the localized stages, this mask is no longer a single contiguous interval only; instead, it is generated by embedding the watermark almost everywhere and then carving one or more short ``holes'' in the signal. This makes the localization task more realistic for streaming verification.
+
+\section{Implemented Model Architecture}
+\subsection{Encoder}
+The encoder is a \textbf{message-conditioned dilated residual network} operating directly on the waveform. The current implementation uses:
+\begin{itemize}[leftmargin=1.25em]
+  \item an input projection convolution,
+  \item seven conditioned residual blocks with dilations $[1,2,4,8,16,32,64]$,
+  \item group normalization and GELU activations,
+  \item a final 1D convolution followed by \texttt{tanh} scaling to enforce a bounded residual.
+\end{itemize}
+Each residual block is conditioned on the payload through an affine transformation of the block activations. This design allows the message bits to influence the perturbation at multiple temporal scales instead of only at the input layer.
+
+With the current hyperparameters, the encoder receptive field is 769 samples, which corresponds to approximately 48~ms at 16~kHz. This is still lightweight enough for real-time use, but substantially larger than the first prototype used earlier in the project.
+
+\begin{lstlisting}[language=Python,caption={Simplified encoder forward pass from the implemented model.},label={lst:encoder_forward}]
+def forward(self, x, bits):
+    msg = self.msg_fc(bits)
+    h = self.in_proj(x)
+    for block in self.blocks:
+        h = block(h, msg)
+    h = F.gelu(self.out_norm(h))
+    residual = torch.tanh(self.out_conv(h)) * self.max_delta
+    y = torch.clamp(x + residual, -1.0, 1.0)
+    return y, residual
+\end{lstlisting}
+
+\subsection{Detector}
+The detector is also waveform-based. It consists of:
+\begin{itemize}[leftmargin=1.25em]
+  \item a downsampling 1D CNN backbone with residual blocks,
+  \item a \textbf{presence head} that predicts frame-level watermark logits,
+  \item a \textbf{bit context module} that refines the backbone features,
+  \item a \textbf{masked statistics pooling} module, and
+  \item an MLP that predicts the final payload bits.
+\end{itemize}
+The detector downsampling factor is 16, which produces a compact frame sequence while preserving enough temporal resolution for localization.
+
+The key difference from the original draft is the decoding strategy. Instead of predicting payload bits independently at each frame and averaging the logits afterwards, the current detector computes a pooled feature vector over the watermark region. For each channel $c$, it estimates a weighted mean and standard deviation:
+\begin{equation}
+  \mu_c = \frac{\sum_f w_f z_{c,f}}{\sum_f w_f},
+  \qquad
+  \sigma_c = \sqrt{\frac{\sum_f w_f(z_{c,f}-\mu_c)^2}{\sum_f w_f} + \varepsilon},
+\end{equation}
+where $z_{c,f}$ are detector features and $w_f$ are either ground-truth mask weights (during training) or predicted presence-derived weights (during inference). The concatenated vector $[\mu;\sigma]$ is then fed into an MLP to recover the payload.
+
+\begin{lstlisting}[language=Python,caption={Simplified payload decoding with masked statistics pooling.},label={lst:masked_pool}]
+def decode_bits(self, features, weights=None):
+    z = self.bit_context(features)
+    pooled = self.masked_stats_pool(z, weights)
+    return self.bit_mlp(pooled)
+\end{lstlisting}
+
+This architectural change was one of the main reasons training became stable.
+
+\section{Staged Training Curriculum}\label{sec:curriculum}
+\subsection{Why a curriculum was required}
+Directly training a localized, low-latency, payload-carrying watermark from scratch proved unstable. Early runs often converged to degenerate solutions: either the detector predicted watermark everywhere, or the payload decoder remained near random accuracy. To resolve this, the training process was split into stages, each solving one subproblem at a time.
+
+\subsection{Implemented stages}
+Table~\ref{tab:curriculum} summarizes the stages that were actually used in the current project.
+
+\begin{table}[H]
+\centering
+\caption{Implemented training curriculum used in the current system.}
+\label{tab:curriculum}
+\begin{tabular}{p{2.0cm}p{4.2cm}p{7.6cm}}
+\toprule
+\textbf{Stage} & \textbf{Purpose} & \textbf{Main settings} \\
+\midrule
+Debug stage 0 & verify that the bit channel can learn at all & one-file or tiny-manifest sanity checks, fixed payloads, no attacks, no quality penalty \\
+Stage 1 bridge (4-bit) & learn a reliable payload on real speech & full-segment watermark, 4-bit payload, 2~s segments, no negatives, no quality penalty \\
+Stage 2A detector calibration & teach the detector to separate watermark from clean audio & full-segment watermark, \texttt{p\_watermark=0.5}, positives and negatives mixed, 4-bit payload \\
+Stage 3 localization & introduce localized watermark regions & 4~s segments, dropout embedding with short holes, balanced presence loss, 4-bit payload \\
+Stage 4 latency & improve short-prefix payload recovery & stage 3 setup + latency auxiliary loss on prefixes of 0.25/0.5/1.0/2.0~s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In all stage transitions, the training script resumes from the best checkpoint of the previous stage by loading \textbf{model weights only}. Optimizer state is deliberately \emph{not} resumed between stages, because each stage changes the objective and the data distribution.
+
+\subsection{Current stable stages}
+The current thesis results are based on the following two mature configurations:
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{Stage 3 (localized 4-bit)}: dropout embedding with \texttt{ensure\_prefix\_seconds=1.25}, one optional hole of 0.10--0.25~s, and no quality penalty.
+  \item \textbf{Stage 4 (latency 4-bit)}: a fine-tuning stage with \texttt{ensure\_prefix\_seconds=2.0}, very small holes, and an auxiliary prefix-decoding loss applied with probability 0.8.
+\end{itemize}
+
+\subsection{Training objective in the implemented system}
+The full training objective in the code can be written as
+\begin{equation}
+  \mathcal{L}_{\mathrm{total}} = \lambda_{\mathrm{pres}}\mathcal{L}_{\mathrm{pres}} +
+  \lambda_{\mathrm{bit}}\mathcal{L}_{\mathrm{bit}} +
+  \lambda_{\mathrm{lat}}\mathcal{L}_{\mathrm{lat}} +
+  \lambda_{\mathrm{stft}}\mathcal{L}_{\mathrm{stft}} +
+  \lambda_{\mathrm{l2}}\mathcal{L}_{\mathrm{l2}}.
+\end{equation}
+In the currently reported stages, the most important terms are the presence loss, the bit loss, and, in stage~4, the latency loss. The STFT and $\ell_2$ audio-quality losses exist in the code base, but were set to zero in the strongest current latency checkpoints in order to first establish a high-performance watermarking baseline.
+
+The latency term reuses the detection and payload losses on truncated prefixes. This is what directly pushed stage~4 toward earlier payload decoding:
+\begin{lstlisting}[language=Python,caption={Latency auxiliary loss used during stage 4 fine-tuning.},label={lst:latency_loss}]
+if latency_enable and random() < latency_p:
+    Tchunk = seconds_to_samples(sampled_chunk_seconds)
+    y_chunk = y_att[:, :, :Tchunk]
+    m_chunk = mask_use[:, :, :Tchunk]
+    pres_l, bit_l = compute_detection_losses_only(
+        y_chunk, m_chunk, bits, model.detector, cfg
+    )
+    lat_loss = lambda_pres * pres_l + lambda_bit * bit_l
+    loss = loss + latency_weight * lat_loss
+\end{lstlisting}
+
+\subsection{Optimizer and training settings}
+The implemented system uses AdamW with gradient clipping and fixed random seeds. Mixed precision was tested, but the stable stage~3 and stage~4 runs reported in this chapter were trained with \texttt{amp=false}. Validation is performed twice after each epoch:
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{clean validation}: watermark applied without extra train-time distortion,
+  \item \textbf{attacked validation}: watermark passed through the differentiable training attack operator.
+\end{itemize}
+The best checkpoint is selected using clean validation bit accuracy.
+
+\section{Attack Model and Evaluation Protocol}
+\subsection{Training-time attacks}
+In the reported stable stages, training-time attacks were intentionally kept weak or disabled. This was a pragmatic decision: first solve localization and latency, then gradually introduce stronger robustness constraints. For stage~3 and stage~4, the current configs keep noise, gain, and resampling effectively neutral during training.
+
+\subsection{Evaluation-time attacks}
+Robustness is measured with a dedicated evaluation script that applies a fixed attack suite outside the differentiable training graph. The current evaluation includes:
+\begin{itemize}[leftmargin=1.25em]
+  \item additive noise,
+  \item speed/resampling perturbation,
+  \item low-pass filtering,
+  \item crop-and-pad,
+  \item bit-depth reduction,
+  \item MP3 round-trip,
+  \item AAC round-trip.
+\end{itemize}
+For each attack, the evaluation runs both positive and negative trials. Positive trials apply the attack to a watermarked segment. Negative trials apply the same attack to the clean segment. This allows the system to report both true positives and false positives under the same channel transformation.
+
+\subsection{Metrics}
+The implemented evaluation reports the following metrics:
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{TPR/FPR}: binary watermark detection quality,
+  \item \textbf{bit accuracy}: fraction of correctly decoded payload bits,
+  \item \textbf{message accuracy}: fraction of samples whose entire payload is decoded correctly,
+  \item \textbf{localization IoU/F1}: alignment of the predicted watermark mask with the ground-truth mask,
+  \item \textbf{prefix metrics}: TPR and message accuracy at 0.25~s, 0.5~s, 1.0~s, and 2.0~s.
+\end{itemize}
+The prefix metrics are particularly important for the thesis claim about low-latency verification.
+
+\section{Empirical Results Achieved So Far}
+\subsection{Stage 3: localized 4-bit watermark}
+The stage~3 checkpoint established that the system can be both highly accurate and localized. On clean evaluation, the model achieved:
+\begin{itemize}[leftmargin=1.25em]
+  \item TPR = 1.000,
+  \item FPR = 0.0059,
+  \item bit accuracy = 0.9888,
+  \item message accuracy = 0.9732,
+  \item localization IoU = 0.9990,
+  \item localization F1 = 0.9995.
+\end{itemize}
+These results show that stage~3 already solved the main localization problem while keeping false positives low.
+
+\subsection{Stage 4: latency-focused fine-tuning}
+Stage~4 was designed to improve \emph{how early} the payload can be recovered from the audio stream. It succeeded. According to the current short technical report, stage~4 preserved strong full-length performance while dramatically improving short-prefix decoding:\footnote{These stage~3/stage~4 summary numbers are taken from the uploaded short technical report and were used as the current external summary of the system.}
+\begin{table}[H]
+\centering
+\caption{Stage~3 vs. stage~4 latency-related payload recovery on clean audio.}
+\label{tab:stage3_stage4_latency}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Stage 3} & \textbf{Stage 4} \\
+\midrule
+Message accuracy @ 0.25~s & 0.015 & 0.635 \\
+Message accuracy @ 0.5~s  & 0.105 & 0.675 \\
+Message accuracy @ 1.0~s  & 0.335 & 0.690 \\
+Message accuracy @ 2.0~s  & 0.460 & 0.785 \\
+Full clean message accuracy & 0.990 & 0.960 \\
+False-positive rate & 0.010 & 0.010 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is the central result of the current implementation: stage~4 retains a very strong detector while making the payload decodable far earlier in the utterance.
+
+\subsection{Additional robustness findings}
+The current stage~4 robustness CSV shows the following tendencies:
+\begin{itemize}[leftmargin=1.25em]
+  \item under additive noise and low-pass filtering, performance remains close to the clean case;
+  \item under MP3 compression, message accuracy stays very high (about 0.975 for the evaluated bitrates);
+  \item under AAC compression, performance is noticeably worse and remains a clear weakness of the current model;
+  \item moderate speed perturbations are survivable, but still more challenging than noise or low-pass filtering.
+\end{itemize}
+In other words, the current model is already strong against several common manipulations, but codec robustness is not yet uniform across all formats.
+
+\subsection{What the current results support}
+Based on the implemented experiments, the thesis can already make the following claims:
+\begin{enumerate}[leftmargin=1.25em]
+  \item the watermark detector can achieve very low false-positive rate together with perfect or near-perfect true-positive rate on LibriSpeech test segments;
+  \item localized watermarking can be learned reliably in a waveform-domain model;
+  \item a curriculum that explicitly optimizes short prefixes can improve low-latency payload recovery by a large margin;
+  \item this latency gain does not require sacrificing the detector into a trivial always-positive solution.
+\end{enumerate}
+
+\section{Qualitative Audio Inspection and Demo Examples}
+To complement aggregate metrics, the implementation includes a script that selects random files from a manifest, applies the watermark, saves both the original and watermarked waveforms, and runs inference on both versions. This produces a practical demo bundle containing:
+\begin{itemize}[leftmargin=1.25em]
+  \item \texttt{original.wav},
+  \item \texttt{watermarked.wav},
+  \item \texttt{delta.wav},
+  \item \texttt{delta\_normalized.wav},
+  \item \texttt{delta\_xgain.wav},
+  \item \texttt{meta.json},
+  \item a summary CSV/JSON with detector outputs.
+\end{itemize}
+The uploaded stage~4 demo report indicates that on five randomly sampled files, every clean example was classified as \emph{not watermarked}, while every watermarked example was classified as \emph{watermarked} and decoded with 100\% payload accuracy. This is a strong qualitative confirmation that the detector behaves correctly on individual samples.
+
+However, the same demo also revealed a remaining limitation: the average absolute perturbation was still large (approximately 0.16--0.18), and the maximum perturbation reached the configured ceiling of 0.18. Therefore, the current latency-optimized checkpoint is best interpreted as a \textbf{strong functional watermark}, not yet as a fully imperceptible watermark. The next engineering step is to preserve as much of the current detector/payload performance as possible while reducing audible distortion.
+
+\section{Implementation Notes and Reproducibility}
+The current code base is organized around a small number of explicit components:
+\begin{itemize}[leftmargin=1.25em]
+  \item \texttt{watermark/model.py}: encoder, detector, and combined network,
+  \item \texttt{watermark/runtime.py}: model construction, embedding helpers, and detector helper functions,
+  \item \texttt{train.py}: staged training loop,
+  \item \texttt{eval.py}: clean/attacked evaluation,
+  \item \texttt{robustness\_eval.py}: sweep over black-box attacks and prefix lengths,
+  \item \texttt{scripts/render\_watermark\_examples.py}: qualitative listening examples.
+\end{itemize}
+Random seeds are fixed in all official configs. Dataset splits are stored explicitly as CSV manifests. Stage transitions are reproducible because the configs and checkpoint naming convention are explicit.
+
+A representative training command for the current best latency-oriented stage is shown below.
+\begin{lstlisting}[language=bash,caption={Example stage~4 training command.},label={lst:stage4_cmd}]
+python train.py \
+  --config configs/stage4_latency_4bit.yaml \
+  --train_manifest manifests/train_2k.csv \
+  --val_manifest manifests/val_200.csv \
+  --resume checkpoints_stage3_localize_4bit/best_clean_bitacc.pt
+\end{lstlisting}
+
+Likewise, robustness evaluation with latency probes is performed as follows:
+\begin{lstlisting}[language=bash,caption={Example robustness and latency evaluation command.},label={lst:robustness_cmd}]
+python robustness_eval.py \
+  --config configs/stage4_latency_4bit.yaml \
+  --checkpoint checkpoints_stage4_latency_4bit/best_clean_bitacc.pt \
+  --manifest manifests/librispeech_test.csv \
+  --out results/stage4_latency.csv \
+  --latency
+\end{lstlisting}
+
+\section{Current Limitations and Next Step}
+The current implementation has three important limitations.
+\begin{enumerate}[leftmargin=1.25em]
+  \item It is still evaluated only on speech (LibriSpeech), not on a truly multi-domain audio corpus.
+  \item The reported best checkpoint is optimized primarily for detection, localization, and low-latency payload recovery, not yet for imperceptibility.
+  \item The user-side deepfake/replay detection branch remains outside the current implemented scope.
+\end{enumerate}
+
+Therefore, the most appropriate next stage is a \emph{quality-oriented fine-tuning stage}: reduce \texttt{max\_delta}, add small STFT and $\ell_2$ penalties, and then measure the trade-off between audio quality and message recovery. From the perspective of the thesis, this is a useful and honest stopping point: the current system already demonstrates a localized, low-FPR, low-latency watermark, while the remaining work is primarily about perceptual refinement rather than about making the watermark function at all.
+
+\FloatBarrier
+
+\section*{References}
+\small
+\noindent [55] SynthID --- Google DeepMind. \url{https://deepmind.google/models/synthid/}\par
+\noindent [56] Proactive Detection of Voice Cloning with Localized Watermarking (AudioSeal). \url{https://arxiv.org/abs/2401.17264}\par
+\noindent [57] AudioMarkBench: Benchmarking Robustness of Audio Watermarking. \url{https://arxiv.org/abs/2406.06979}\par
+\noindent [58] LibriSpeech ASR corpus (OpenSLR SLR12). \url{https://www.openslr.org/12/}\par
+\noindent [70] ITU-T Rec. P.800.1: Mean Opinion Score (MOS) terminology. \url{https://www.itu.int/rec/dologin_pub.asp?id=T-REC-P.800.1-200303-S%21%21PDF-E&lang=e&type=items}\par
+\noindent [71] ITU-T Rec. P.862: Perceptual evaluation of speech quality (PESQ). \url{https://www.itu.int/rec/T-REC-P.862/}\par
+\noindent [72] Taal et al.\ (2011): Short-Time Objective Intelligibility (STOI). \url{https://sps.ewi.tudelft.nl/pubs/Taal2011_1.pdf}\par
