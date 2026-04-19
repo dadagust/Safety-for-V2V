@@ -2,61 +2,117 @@
 \chapter{Literature Review}\label{chap:litreview}
 
 \section{Review Scope and Questions}
-This chapter surveys work relevant to securing voice assistants against spoofing, with emphasis on: (i) attacks and defenses in voice interfaces; (ii) audio watermarking for speech provenance; and (iii) deepfake/replay detection. The literature review intentionally covers both the \emph{implemented} watermarking branch of the current thesis and the \emph{planned} user-side detector branch, because the latter remains important for the long-term system architecture even though it is not experimentally realized in the present prototype.
+This chapter reviews the literature most relevant to the thesis problem of securing conversational audio systems against spoofing, impersonation, and provenance ambiguity. The review spans three tightly connected areas: (i) attacks and defensive requirements in voice interfaces; (ii) audio watermarking for synthetic-speech provenance; and (iii) deepfake and replay detection for user-originated audio. The implemented prototype of the present thesis belongs to the second area, namely assistant-output watermarking, but the third area remains important because it motivates the broader middleware architecture discussed throughout the dissertation.
 
 \section{Review Method (Concise Summary)}
-We adopt a structured narrative review aligned with established software-engineering evidence guidelines. At a high level, we (1) defined broad questions and a taxonomy; (2) searched major digital libraries and reputable preprint servers using terms such as \emph{voice assistant security}, \emph{audio watermark*}, \emph{speech deepfake}, \emph{spoofing}, \emph{replay detection}, and \emph{ASVspoof}; (3) prioritized peer-reviewed papers and widely cited technical reports; and (4) synthesized findings by theme. Because our goal is to scope and synthesize (not to conduct a full SLR/meta-analysis), we report a concise method summary and do not claim exhaustiveness; however, we follow the spirit of systematic mapping---transparent scope, inclusion logic, and categorized synthesis---commonly used in CS reviews.
+A structured narrative review was used instead of a full systematic literature review. The process followed four simple steps: first, we defined a taxonomy aligned with the bidirectional nature of conversational systems; second, we searched major digital libraries, arXiv, conference proceedings, and official technical webpages using combinations of the keywords \emph{voice assistant security}, \emph{audio watermarking}, \emph{speech provenance}, \emph{deepfake speech}, \emph{replay detection}, and \emph{ASVspoof}; third, we prioritized peer-reviewed work and primary technical sources when available; and fourth, we synthesized the findings by theme. The goal of the review is therefore not exhaustive coverage of all audio forensics, but rather a technically grounded synthesis that explains why the present prototype was designed the way it was.
 
 \section{Taxonomy Used in This Review}
-We organize the field into four themes that map to the dual-channel (user$\rightarrow$agent / agent$\rightarrow$user) nature of conversational systems:
+The reviewed work is organized into four themes:
 \begin{enumerate}[leftmargin=1.25em]
-  \item \textbf{Threats and Attacks in Voice Interfaces} (replay, TTS/VC deepfakes, injection vectors).
-  \item \textbf{Audio Watermarking for Speech Provenance} (payload and zero-bit watermarks; robustness vs.\ imperceptibility; deployment in TTS).
-  \item \textbf{Deepfake and Replay Detection} (features, end-to-end models, generalization and calibration).
-  \item \textbf{Hybrid/Integrated Defenses} (joint watermarking--detection and attribution).
+  \item \textbf{Threats and attacks in voice interfaces} (replay, injected commands, TTS/VC impersonation, deepfakes);
+  \item \textbf{Audio watermarking for speech provenance} (zero-bit and payload-bearing watermarking, robustness, imperceptibility, localization, deployment constraints);
+  \item \textbf{Deepfake and replay detection} (artifact-based detection, generalization, calibration, channel mismatch);
+  \item \textbf{Hybrid and integrated defenses} (systems that combine provenance, attribution, and detector signals).
 \end{enumerate}
+This taxonomy is useful because the thesis itself sits at the boundary between provenance and detection: the current implementation realizes only the provenance branch, while the full long-term architecture requires both.
 
 \section{Voice Assistant Security and AI-Generated Audio Threats}
-Voice-based digital assistants pose unique security and privacy challenges due to their open-microphone design and reliance on audio commands\,[15]. Prior work documents replay attacks (recorded voice commands or wake-words) and, more recently, high-quality AI voice cloning. With modern TTS/VC, a few seconds of someone’s voice---or even cross-modal cues such as photos in specialized systems like Foice---can suffice to synthesize arbitrary speech in their timbre\,[3][16]. This enables impersonation and vishing at scale. Public evaluations have also shown that commercial voice authentication can be fooled by cloned voices\,[3]. The ASV literature further shows that, without countermeasures, automatic speaker verification is vulnerable to both replay and synthetic speech\,[17][18].
+Voice assistants operate through an unusually exposed interface: they continuously accept acoustic input and often produce trusted speech output intended to guide user actions. Prior work has long documented replay attacks and injected commands in such systems\,[15]. Recent advances in voice cloning and speech generation have substantially amplified the threat surface. With modern TTS and voice conversion, attackers can synthesize speech that is close enough to a target speaker to fool listeners and, in some cases, deployed verification systems\,[3][16][17][18].
 
-\paragraph{Attack directions.}
-\textbf{(U$\rightarrow$A)} An adversary impersonates a user or injects commands via replay or TTS/VC, relying on ASR and any voice verification to accept the content. \textbf{(A$\rightarrow$U)} A fake voice pretends to be the assistant (e.g., in phishing calls or man-in-the-middle tampering). While the first direction is well studied, the second motivates watermarking for assistant speech so verifiers can validate provenance.
+\paragraph{Two attack directions.}
+For conversational systems, the threat model is naturally bidirectional.
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{User $\rightarrow$ assistant.} An attacker attempts to impersonate a user or inject commands by replaying prior recordings or synthesizing speech with TTS/VC.
+  \item \textbf{Assistant $\rightarrow$ user.} A malicious or tampered audio stream pretends to originate from the assistant, for example in phishing, telephony impersonation, or man-in-the-middle scenarios.
+\end{itemize}
+The first direction motivates user-side deepfake and replay detection. The second direction motivates watermarking of assistant speech, because provenance can then be checked by software instead of by human listening alone.
 
 \section{Audio Watermarking for Speech Provenance}
-Audio watermarking embeds a secret pattern that is inaudible to humans but detectable by machine, even after typical modifications. Within AI speech, this provides provenance for synthetic audio\,[21][22]. We focus on \emph{proactive} watermarking: the assistant marks its own TTS output so that receivers can verify authenticity.
+Audio watermarking embeds a hidden but machine-detectable pattern into an audio signal. In the context of synthetic speech, watermarking is attractive because it transforms provenance checking into a direct verification problem: rather than infer whether a waveform \emph{looks synthetic}, a verifier can test whether it contains the expected mark\,[21][22]. This is especially relevant for assistant speech, where the generator is known and can embed a watermark proactively.
+
+\paragraph{Representative design axes.}
+The recent literature reveals several recurring trade-offs.
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{Zero-bit vs. payload-bearing watermarking.} Zero-bit designs optimize presence/absence detection and often maximize robustness, whereas payload-bearing systems can encode identifiers, model versions, or other metadata at the cost of a harder decoding problem\,[35][36][37].
+  \item \textbf{Localization granularity.} Some systems return only a global confidence score, whereas others explicitly localize where the watermark is present in time\,[14][25][26][27]. Localization matters whenever audio can be cropped, edited, or consumed incrementally.
+  \item \textbf{Robustness vs. perceptual transparency.} Watermarks should survive compression, noise, filtering, and editing, but stronger residuals can damage speech quality. Much recent work explicitly trades off robustness against PESQ/MOS-like fidelity objectives\,[22][28][32][33][34].
+  \item \textbf{Deployment target.} Not all systems solve the same problem. Some watermark generated speech directly; others protect source recordings so that subsequent voice cloning transfers the watermark into the fake speech\,[23][24].
+\end{itemize}
 
 \paragraph{Representative approaches.}
-Zong et al.\ (AudioMarkNet, 2025) embed watermarks into publicly released recordings so that a future cloned voice unwittingly reproduces the mark, enabling simple verification\,[23][24]. Fernandez et al.\ (AudioSeal, 2024) jointly train an embedder and a fast, localized detector with perceptual masking to keep changes inaudible and resilient to cropping/encoding/noise\,[25][26][27][14]. Other works balance fidelity and robustness via redundancy or augmentation (training with distortions and codecs)\,[22][28]. Liu et al.\ (2024) propose timbre watermarking using an encoder--decoder; while highly hidden, it can be brittle under noise+resampling\,[29][30][31]. In contrast, Zong et al.\ report simpler, repeated patterns that survived such attacks when timbre watermarking failed\,[12]. Li et al.\ (TRUE, 2025) emphasize time-domain learning to preserve fidelity while remaining robust, achieving near-original PESQ\,[32][33][34]. For our use case, zero-bit watermarking (presence/absence) is often attractive\,[35][36][37], as it minimizes payload and favors robustness; however, the current implemented prototype uses a \textbf{small 4-bit payload} rather than a strictly zero-bit mark.
+AudioSeal is one of the clearest recent references for localized speech watermarking: it jointly trains a generator and a fast detector, uses a localization loss, and emphasizes robustness together with perceptual masking\,[14][25][26][27][56]. TRUE instead places particularly strong emphasis on fidelity while remaining robust, and reports very high objective speech quality for speech and singing voice\,[32][33][34]. AudioMarkNet addresses a related but different problem: it watermarks source recordings so that later voice-cloning systems inherit the watermark during speaker adaptation, thereby turning fake-speech detection into a watermark retrieval problem\,[23][24]. Proprietary industrial systems such as SynthID demonstrate that watermarking is now viewed not only as an academic topic but also as a deployable transparency mechanism for AI-generated audio\,[55]. Finally, FakeMark extends the discussion toward attribution, showing that watermark-like cues can be coupled with generator-specific artifacts so that the detector is not limited to binary presence detection\,[10][50][51][52][53][54].
 
 \section{Deepfake and Replay Audio Detection}
-Audio deepfake detection distinguishes genuine human speech from synthesized or tampered audio (including replay). Early systems used hand-crafted features (MFCC, CQCC) with classical classifiers; recent work favors deep models on spectrograms or raw waveforms, sometimes leveraging large pre-trained speech encoders\,[38][39][40][5]. A persistent challenge is \emph{generalization}: detectors often excel on known attacks but degrade on unseen methods or channel conditions\,[41][42][6][8]. Reports show EERs rising above 20\% on out-of-distribution data\,[43]. Robustness strategies include diverse attack/channel augmentation, model ensembles, and calibration using DET curves/EER to set operating thresholds\,[44][45][13]. Replay detection additionally exploits environmental cues (microphone/speaker colorations, reverberation), where deep models can learn discriminative patterns when trained with realistic replay data.
+The literature on user-side audio integrity has developed along a partly separate path. Classical systems relied on cepstral features such as MFCC and CQCC with conventional classifiers, while modern systems increasingly use convolutional, transformer-based, or self-supervised speech encoders\,[38][39][40][5]. Across this literature, the main unresolved issue is not in-domain accuracy but \emph{generalization}. Many detectors perform well on known attacks but degrade on unseen generators, codecs, microphones, reverberation conditions, or replay channels\,[41][42][6][8][43].
 
-\paragraph{Impact of the transmission channel.}
-Assistants frequently receive compressed and noisy audio; codecs and room acoustics can blur artifacts. Some findings indicate artifact-based detection may remain informative under neural codecs while naïve watermarking may be stripped\,[50]. This trade-off motivates combining detection with watermarking.
+\paragraph{Why channel realism matters.}
+This observation is directly relevant to the current thesis. If a defense is evaluated only on clean offline signals, the reported numbers may be optimistic for deployment. Real systems involve compression, transmission, room acoustics, and device-specific colorations. Prior work therefore stresses augmentation, calibration, and realistic channel simulation when assessing deepfake detection and provenance mechanisms\,[44][45][13]. This point strongly influenced the methodology of the present thesis: even though the implemented benchmark remains modest, it deliberately includes codecs, filtering, and resampling-based perturbations instead of reporting clean-only numbers.
 
-\section{Hybrid/Integrated Defenses}
-Hybrid designs strengthen resilience by offering multiple, complementary signals. FakeMark (2025) injects watermarked artifacts that aid attribution and remain useful even if one cue is weakened\,[51][52][53][54]. This dual-cue principle underpins the \emph{long-term architecture} of our system vision: attackers would ideally need to both (i) evade or remove the assistant’s watermark and (ii) leave no detectable synthesis/replay traces. However, in the current thesis this second detector cue remains conceptual rather than implemented, so the empirical work focuses on the watermarking branch alone.
+\section{Hybrid and Integrated Defenses}
+The strongest systems-level conclusion from the literature is that no single signal is likely to remain sufficient forever. Pure artifact-based detection may fail under distribution shift, while pure watermarking may be weakened by severe channel distortion or targeted removal. Hybrid designs therefore attempt to combine complementary cues. FakeMark is especially important here because it makes this idea explicit: the system couples watermark-like signatures with intrinsic generation artifacts so that attribution can still succeed even if one cue weakens\,[50][51][52][53][54].
+
+This layered perspective motivates the broader architecture discussed in the present thesis. The implemented prototype should therefore be interpreted as the \emph{assistant-output provenance layer} of a future bilateral middleware rather than as a complete end-to-end anti-spoofing solution.
 
 \section{Synthesis: What the Literature Implies for Our Design}
-\textbf{(S1) Provenance works in practice.} Modern speech watermarks can be imperceptible (MOS-comparable to unwatermarked TTS) yet resilient to real-world edits\,[14][25][27]. \textbf{(S2) Detection remains necessary.} Generalization is hard; unseen generators and channels inflate EER\,[6][8][41][43]. \textbf{(S3) Layering helps.} Combining watermarking with artifact detection hardens systems against both removal attempts and generator evolution\,[51][52]. \textbf{(S4) Channel realism is critical.} Training/evaluating under realistic distortions and codecs improves robustness and yields honest operating points\,[44][45][13].
-
-\subsection{Our design vs.\ prior art}
-The current thesis differs from prior work in several concrete ways:
+Four design lessons follow from the reviewed work.
 \begin{itemize}[leftmargin=1.25em]
-  \item \textbf{Implemented scope is narrower than the full architecture.} Unlike hybrid proposals such as FakeMark that are discussed as integrated multi-cue defenses, the present prototype \emph{implements only the assistant-output watermarking branch}; the user-side deepfake/replay detector is an integration path for future work.
-  \item \textbf{Localized, prefix-aware verification is a primary design target.} Relative to AudioSeal-style localized detection, our system places unusual emphasis on whether the watermark can already be \emph{decoded from short prefixes} (0.25/0.5/1.0/2.0~s), not merely detected after the full utterance.
-  \item \textbf{Small-payload watermark instead of strict zero-bit detection.} Whereas many provenance systems emphasize presence/absence only, the current prototype embeds a \textbf{4-bit payload} and decodes it through masked statistics pooling over the predicted watermark region.
-  \item \textbf{Training objective prioritizes functionality before perceptual refinement.} In contrast to systems such as TRUE that strongly emphasize fidelity, the stable checkpoints in this thesis first prioritize reliable detection, localization, and early decoding; quality-oriented tuning is explicitly deferred to the next engineering stage.
-  \item \textbf{Evaluation scope is intentionally constrained.} Rather than claiming broad cross-domain or full VoIP-room-acoustics generalization, the implemented benchmark is limited to \textbf{LibriSpeech} and a concrete black-box attack suite (noise, speed/resampling, low-pass, crop-pad, bit-depth, MP3, AAC), which makes the claims narrower but better aligned with the actual evidence.
+  \item \textbf{Provenance should be proactive.} If the assistant controls its own TTS pipeline, embedding the watermark at generation time is preferable to relying only on downstream artifact detection\,[14][25][26][27].
+  \item \textbf{Localization is operationally important.} Edited, cropped, or streamed audio is easier to verify when the detector predicts where the watermark is present instead of outputting only a global score\,[14][25][26][27].
+  \item \textbf{Perceptual quality must be measured explicitly.} Strong detection performance is not enough if the watermark remains audible. Recent systems such as TRUE make fidelity a first-class objective rather than an afterthought\,[32][33][34].
+  \item \textbf{Channel diversity must be part of the benchmark.} Codec and transmission realism are essential for honest claims about robustness\,[44][45][13].
 \end{itemize}
+These lessons explain the current prototype's emphasis on localized detection and prefix-aware verification, while also clarifying two of its current weaknesses: perceptual evaluation is still too limited, and channel diversity is narrower than in a fully deployment-oriented benchmark.
+
+\subsection{Our design vs. prior art}
+The present thesis differs from prior work in several specific ways.
+\begin{itemize}[leftmargin=1.25em]
+  \item \textbf{The implemented scope is intentionally narrow.} Unlike fully hybrid proposals, the current prototype implements only the assistant-output watermarking branch. The user-side detector remains a future integration target rather than a claim of current functionality.
+  \item \textbf{Prefix-aware verification is a central objective.} Relative to prior localized watermarking systems, the present work places unusual emphasis on whether the watermark can already be verified from very short prefixes (0.25/0.5/1.0/2.0~s), which is directly relevant to interactive assistants.
+  \item \textbf{The system uses a small payload instead of strict zero-bit detection.} The implemented checkpoint embeds a 4-bit payload and decodes it with masked statistics pooling over the predicted watermark region.
+  \item \textbf{Functionality was prioritized before perceptual refinement.} In contrast to work such as TRUE, the strongest current checkpoint was optimized first for detection, localization, and low-latency decoding, while explicit STFT/$\ell_2$ quality penalties were deferred to a later engineering stage.
+  \item \textbf{The benchmark claims are correspondingly conservative.} The reported evidence is restricted to 16~kHz speech on LibriSpeech plus a concrete black-box attack suite, rather than broad claims about arbitrary acoustics, languages, or end-to-end telephony.
+\end{itemize}
+
+\subsection{Comparison with representative recent systems}
+Table~\ref{tab:related_systems_compare} positions the current prototype against five representative systems frequently discussed in recent work: AudioSeal\,[14][25][26][27][56][73], TRUE\,[32][33][34], AudioMarkNet\,[23][24], SynthID\,[55], and FakeMark\,[10][50][51][52][53][54]. Two cautions are important. First, the systems do not all solve exactly the same task. Second, for proprietary or partially disclosed systems, some fields are not publicly specified and are therefore marked as such. Even with these caveats, the comparison is useful because it makes explicit that the novelty of the present prototype lies less in raw payload size and more in the combination of localized detection, low false-positive operation, and prefix-aware verification.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\caption{Comparison of the current prototype with representative recent audio provenance and attribution systems.}
+\label{tab:related_systems_compare}
+\begin{tabular}{p{1.8cm}p{1.5cm}p{1.6cm}p{1.6cm}p{2.1cm}p{1.8cm}p{1.7cm}p{2.5cm}}
+\toprule
+\textbf{System} & \textbf{Payload} & \textbf{Localization} & \textbf{Prefix-aware} & \textbf{Robustness target} & \textbf{Perceptual focus} & \textbf{Domain} & \textbf{Evaluation attacks} \\
+\midrule
+This work & 4-bit payload & frame-level presence map + masked pooling & yes, explicit 0.25--2.0~s probes & assistant-speech provenance under common black-box edits & secondary in current checkpoint; quality losses currently zero & 16~kHz speech (LibriSpeech) & noise, speed/resample, low-pass, crop-pad, bit-depth, MP3, AAC; code also prepared for phone-band/Opus \\
+\addlinespace[0.15em]
+AudioSeal & optional 16-bit secret message on top of presence detection & strong localized detection (sample/frame-level) & real-time/streaming friendly, but not centered on prefix payload decoding & robust detection after cropping, re-encoding, and noise & strong, explicit perceptual masking objective & speech / AI-generated speech & cropping/editing, re-encoding, noise, common manipulations \\
+\addlinespace[0.15em]
+TRUE & payload-bearing watermark & not primarily presented as localized detector & no explicit prefix-verification emphasis & robustness with very strong fidelity preservation & very strong; high PESQ emphasized & speech and singing voice & broad common audio distortions in paper benchmark \\
+\addlinespace[0.15em]
+AudioMarkNet & registered watermark identity rather than small user payload & coarse 1~s section-wise retrieval & coarse only; 1~s sections/UFL rather than ASR-aligned prefixes & transfer through speaker adaptation and resistance to non-adaptive/adaptive attacks & moderate; quality reported but not the primary novelty & original speech $\rightarrow$ cloned fake speech & noise, resampling, adaptive removal, TTS transfer scenarios \\
+\addlinespace[0.15em]
+SynthID & not publicly disclosed for audio & not publicly disclosed & not publicly disclosed & robustness to common user edits in product setting & product-level inaudibility is a central claim & Google-generated audio products & public claims cover noise, MP3 compression, and speed changes \\
+\addlinespace[0.15em]
+FakeMark & system-correlated signature rather than fixed bitstring & localization is not the primary goal & no & source attribution under domain shift and watermark removal pressure & balanced, but attribution robustness is primary & deepfake speech attribution & codec compression, removal attacks, cross-dataset evaluation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The comparison highlights a useful positioning statement for the thesis. AudioSeal is the closest reference point in terms of localized speech watermarking. TRUE is the closest reference point in terms of fidelity-oriented optimization. AudioMarkNet and FakeMark widen the design space by showing that watermarking can serve not only binary provenance detection but also transfer-based detection and source attribution. SynthID, in turn, demonstrates that industrial deployment places a premium on practicality and user-facing verification, even when many technical details remain undisclosed. Against this background, the present prototype is best described as a \emph{research-oriented localized and prefix-aware speech watermark}, rather than as the final word on either fidelity or product-scale deployment.
 
 \section{Gaps and Research Opportunities}
+The literature still leaves several open problems directly relevant to the thesis.
 \begin{itemize}[leftmargin=1.25em]
-  \item \textbf{Watermark removal under targeted attack.} Systematic studies of adversarial removal vs.\ imperceptibility are still limited, especially for black-box cloners.
-  \item \textbf{Cross-model generalization.} Detectors need stronger transfer to unseen TTS/VC families and neural codecs without frequent retraining.
-  \item \textbf{End-to-end V2V evaluations.} Few works report both provenance \emph{and} detection outcomes with interactive latency and user-perceived quality.
+  \item \textbf{Targeted watermark removal vs. speech quality.} The trade-off between stealth, robustness, and resistance to adaptive removal remains under-characterized for speech.
+  \item \textbf{Cross-channel robustness.} More work is needed on telephony, realistic VoIP paths, room acoustics, and neural codec pipelines.
+  \item \textbf{Short-prefix operating points.} Most work reports full-utterance accuracy, whereas interactive systems need trustworthy early decisions under partial context.
+  \item \textbf{Integrated bilateral middleware.} Few systems jointly quantify assistant-output provenance, user-input integrity, and conversational latency within one end-to-end benchmark.
 \end{itemize}
-These gaps motivate the present thesis in two ways: first, by focusing the implemented work on a reproducible watermarking benchmark; and second, by keeping the user-side detector and full bilateral middleware as clearly labeled future extensions rather than overstating what has already been built.
+These gaps motivate the present thesis directly: the current implementation tackles localized, low-latency assistant-output watermarking first, while leaving fidelity-oriented refinement, broader channel realism, and bilateral integration to the next stage of work.
 
 \section{Threats to the Validity of This Review}
-\textbf{Construct validity.} Our taxonomy focuses on watermarking and detection for voice assistants; broader audio forensics is only tangentially covered. \textbf{Internal validity.} Because this is a structured narrative review rather than a full SLR, selection bias is possible; we mitigated it by searching multiple venues and preferring peer-reviewed and widely cited sources. \textbf{External validity.} Findings may not generalize to all languages, devices, or proprietary codecs; we therefore prioritize design patterns (layering, channel realism) over narrow system choices.
+Three limitations should be acknowledged. First, the review is intentionally centered on voice-assistant security, so broader audio forensics is covered only selectively. Second, because the review is structured and narrative rather than fully systematic, some selection bias remains possible despite the focus on primary sources. Third, several industrial systems, most notably SynthID, disclose only high-level properties publicly; any comparison involving them must therefore distinguish between what is explicitly documented and what is simply not public.

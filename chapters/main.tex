@@ -21,7 +21,7 @@
 
 \usepackage[english]{babel}
 \usepackage[backend=biber,style=ieee,autocite=inline]{biblatex}
-\bibliography{ref.bib}
+\IfFileExists{ref.bib}{\bibliography{ref.bib}}{\IfFileExists{../ref.bib}{\bibliography{../ref.bib}}{}}
 \DefineBibliographyStrings{english}{%
   bibliography = {References},}
 \usepackage{blindtext}
@@ -44,7 +44,7 @@
 
 \usepackage{float}
 \usepackage{graphicx}
-\graphicspath{{figs/}} %path to images
+\graphicspath{{chapters/figs/}{figs/}} %path to images
 \usepackage{array}
 \usepackage{multirow,array}
 \usepackage{caption}
@@ -109,7 +109,7 @@
 
 \begin{document}
 
-\includepdf[pages=-]{title.pdf}
+\IfFileExists{title.pdf}{\includepdf[pages=-]{title.pdf}}{\IfFileExists{../title.pdf}{\includepdf[pages=-]{../title.pdf}}{}}
 \tableofcontents
 \listoftables
 \listoffigures
