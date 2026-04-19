@@ -325,7 +325,7 @@ python robustness_eval.py \
 The current implementation has four important limitations.
 \begin{enumerate}[leftmargin=1.25em]
   \item It is still evaluated only on speech (LibriSpeech), not on a truly multi-domain audio corpus.
-  \item The reported best checkpoint is optimized primarily for detection, localization, and low-latency payload recovery, not yet for imperceptibility.
+  \item The reported best checkpoint is optimized primarily for detection, localization, and low-latency payload recovery, but the watermark haven't yet been properly convinced of the imperceptibility.
   \item The user-side deepfake/replay detection branch remains outside the current implemented scope.
   \item Full end-to-end V2V middleware latency is not measured; only watermark-prefix behavior is quantified.
 \end{enumerate}
