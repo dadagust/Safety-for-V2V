@@ -1,3 +1,11 @@
+# Stage 5: imperceptibility-oriented fine-tuning.
+# Intended usage:
+# python train.py \
+#   --config configs/stage5_imperceptible_4bit.yaml \
+#   --train_manifest manifests/librispeech_train.csv \
+#   --val_manifest manifests/librispeech_val.csv \
+#   --resume checkpoints_stage4_latency_4bit/best_clean_bitacc.pt
+
 seed: 1337
 
 audio:
@@ -7,15 +15,15 @@ audio:
 
 embed:
   mode: dropout
-  ensure_prefix_seconds: 2.0
-  num_holes: [0, 1]
-  hole_seconds: [0.05, 0.20]
-  ramp_ms: 10.0
+  ensure_prefix_seconds: 1.0
+  num_holes: [1, 3]
+  hole_seconds: [0.15, 0.45]
+  ramp_ms: 15.0
 
 latency_train:
   enable: true
-  weight: 1.0
-  p_apply: 0.8
+  weight: 0.35
+  p_apply: 0.6
   chunk_seconds: [0.25, 0.5, 1.0, 2.0]
 
 model:
@@ -32,31 +40,37 @@ model:
   det_groups: 8
   det_dropout: 0.0
   bit_mlp_hidden: 256
-  max_delta: 0.18
+  max_delta: 0.035
 
 train:
   batch_size: 8
   num_workers: 2
-  lr: 0.0001
-  weight_decay: 0.0
-  epochs: 4
+  lr: 0.00005
+  weight_decay: 0.0001
+  epochs: 6
   steps_per_epoch: 1500
   p_watermark: 0.7
   grad_clip: 1.0
   amp: false
   log_every: 50
-  ckpt_dir: checkpoints_stage4_latency_4bit
+  ckpt_dir: checkpoints_stage5_imperceptible_4bit
   save_every_steps: 500
+  select_best_metric: val_clean_loss_total
+  select_best_mode: min
 
 loss:
   presence_weight: 1.0
-  bit_weight: 1.3
-  stft_weight: 0.0
-  l2_weight: 0.0
+  bit_weight: 0.85
+  stft_weight: 0.20
+  l2_weight: 0.10
+  delta_l1_weight: 0.20
+  snr_hinge_weight: 0.03
+  snr_target_db: 16.0
   balance_presence: true
   stft_scales:
     - {n_fft: 512, hop: 128, win: 512}
     - {n_fft: 1024, hop: 256, win: 1024}
+    - {n_fft: 2048, hop: 512, win: 2048}
 
 attacks_train:
   noise_snr_db: [100, 100]

@@ -341,18 +341,64 @@ def bitdepth_reduce_np(x: np.ndarray, bits: int) -> np.ndarray:
     return np.clip(y, -1.0, 1.0).astype(np.float32)
 
 
+def mulaw_roundtrip_np(x: np.ndarray, mu: int = 255) -> np.ndarray:
+    """Approximate 8-bit mu-law telephony companding round-trip."""
+    mu = int(mu)
+    x = np.clip(np.asarray(x, dtype=np.float32), -1.0, 1.0)
+    companded = np.sign(x) * (np.log1p(mu * np.abs(x)) / np.log1p(mu))
+    q = np.round((companded + 1.0) * 127.5) / 127.5 - 1.0
+    y = np.sign(q) * ((np.power(1.0 + mu, np.abs(q)) - 1.0) / mu)
+    return np.clip(y.astype(np.float32), -1.0, 1.0)
+
+
+def _resample_fixed_len_np(x: np.ndarray, orig_sr: int, target_sr: int, out_len: int | None = None) -> np.ndarray:
+    if orig_sr == target_sr:
+        y = np.asarray(x, dtype=np.float32)
+    else:
+        g = math.gcd(int(orig_sr), int(target_sr))
+        up = int(target_sr) // g
+        down = int(orig_sr) // g
+        y = resample_poly(x, up, down).astype(np.float32)
+    if out_len is not None:
+        if y.shape[0] < out_len:
+            y = np.pad(y, (0, out_len - y.shape[0]), mode="constant")
+        elif y.shape[0] > out_len:
+            y = y[:out_len]
+    return np.clip(y, -1.0, 1.0).astype(np.float32)
+
+
+def telephone_channel_np(
+    x: np.ndarray,
+    sr: int,
+    low_hz: float = 300.0,
+    high_hz: float = 3400.0,
+    narrow_sr: int = 8000,
+    apply_mulaw: bool = True,
+) -> np.ndarray:
+    """Lightweight PSTN-style proxy: band-limit, 8 kHz narrowband, optional mu-law."""
+    x = np.asarray(x, dtype=np.float32)
+    T = x.shape[0]
+    y = highpass_np(lowpass_np(x, sr, high_hz), sr, low_hz)
+    y = _resample_fixed_len_np(y, sr, narrow_sr)
+    if apply_mulaw:
+        y = mulaw_roundtrip_np(y)
+    y = _resample_fixed_len_np(y, narrow_sr, sr, out_len=T)
+    return np.clip(y, -1.0, 1.0).astype(np.float32)
+
+
 def _ffmpeg_codec_roundtrip(x: np.ndarray, sr: int, codec: str, bitrate_k: int) -> np.ndarray:
     """
     Encode/decode via ffmpeg using temporary files.
-    codec: "mp3" or "aac"
+    codec: "mp3", "aac", or "opus"
     """
     codec = codec.lower()
-    if codec not in ("mp3", "aac"):
+    if codec not in ("mp3", "aac", "opus"):
         raise ValueError(f"Unsupported codec: {codec}")
 
     with tempfile.TemporaryDirectory() as td:
         in_wav = os.path.join(td, "in.wav")
-        out_enc = os.path.join(td, f"enc.{codec}")
+        enc_ext = "opus" if codec == "opus" else codec
+        out_enc = os.path.join(td, f"enc.{enc_ext}")
         out_wav = os.path.join(td, "out.wav")
 
         sf.write(in_wav, x, sr, subtype="PCM_16")
@@ -363,9 +409,13 @@ def _ffmpeg_codec_roundtrip(x: np.ndarray, sr: int, codec: str, bitrate_k: int) 
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-y", "-vn",
             "-i", in_wav,
+        ]
+        if codec == "opus":
+            cmd_enc.extend(["-c:a", "libopus"])
+        cmd_enc.extend([
             "-b:a", f"{int(bitrate_k)}k",
             out_enc,
-        ]
+        ])
         subprocess.run(cmd_enc, check=True)
 
         # Decode back to wav
@@ -398,3 +448,7 @@ def mp3_roundtrip_np(x: np.ndarray, sr: int, bitrate_k: int) -> np.ndarray:
 
 def aac_roundtrip_np(x: np.ndarray, sr: int, bitrate_k: int) -> np.ndarray:
     return _ffmpeg_codec_roundtrip(x, sr, codec="aac", bitrate_k=bitrate_k)
+
+
+def opus_roundtrip_np(x: np.ndarray, sr: int, bitrate_k: int) -> np.ndarray:
+    return _ffmpeg_codec_roundtrip(x, sr, codec="opus", bitrate_k=bitrate_k)

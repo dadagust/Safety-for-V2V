@@ -68,6 +68,8 @@ attacks_train:
 attacks_eval:
   mp3_bitrates_k: [32, 64, 128]
   aac_bitrates_k: [48, 96, 192]
+  opus_bitrates_k: [12, 24]
+  phone_bandwidth_presets: [pstn]
   noise_snr_db_list: [20, 10, 5]
   resample_factor_list: [0.85, 0.9, 1.1, 1.2]
   lowpass_hz_list: [3000, 6000]

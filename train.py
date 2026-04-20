@@ -14,7 +14,7 @@ import yaml
 
 from watermark.attacks import DifferentiableAttacks, TrainAttackConfig
 from watermark.data import AudioManifestDataset
-from watermark.losses import multiscale_stft_loss, mse_loss
+from watermark.losses import l1_loss, multiscale_stft_loss, mse_loss, snr_db, snr_hinge_loss
 from watermark.runtime import build_model_from_cfg, detector_forward_with_gt_mask, embed_batch
 
 
@@ -83,12 +83,19 @@ def compute_losses(
 
     l2 = mse_loss(x, y_clean)
     stft = multiscale_stft_loss(x, y_clean, cfg["loss"]["stft_scales"])
+    delta_l1 = l1_loss(x, y_clean)
+
+    loss_cfg = cfg.get("loss", {}) or {}
+    snr_target_db = float(loss_cfg.get("snr_target_db", 0.0))
+    snr_hinge = snr_hinge_loss(x, y_clean, snr_target_db) if float(loss_cfg.get("snr_hinge_weight", 0.0)) > 0.0 else x.new_zeros(())
 
     total = (
         float(cfg["loss"]["presence_weight"]) * presence_loss
         + float(cfg["loss"]["bit_weight"]) * bit_loss
         + float(cfg["loss"]["l2_weight"]) * l2
         + float(cfg["loss"]["stft_weight"]) * stft
+        + float(loss_cfg.get("delta_l1_weight", 0.0)) * delta_l1
+        + float(loss_cfg.get("snr_hinge_weight", 0.0)) * snr_hinge
     )
 
     with torch.no_grad():
@@ -108,6 +115,9 @@ def compute_losses(
         "loss_bits": float(bit_loss.item()),
         "loss_l2": float(l2.item()),
         "loss_stft": float(stft.item()),
+        "loss_delta_l1": float(delta_l1.item()),
+        "loss_snr_hinge": float(snr_hinge.item()),
+        "snr_db": float(snr_db(x, y_clean).mean().item()),
         "bit_acc": float(bit_acc.item()),
         "frame_iou": float(frame_iou.item()),
         "wm_frac": float(mask.mean().item()),
@@ -155,6 +165,9 @@ def run_validation(
         "loss_bits": [],
         "loss_l2": [],
         "loss_stft": [],
+        "loss_delta_l1": [],
+        "loss_snr_hinge": [],
+        "snr_db": [],
         "bit_acc": [],
         "frame_iou": [],
         "wm_frac": [],
@@ -326,6 +339,12 @@ def main() -> None:
     global_step = start_step
     best_clean_bit_acc = -1.0
 
+    select_best_metric = str(cfg.get("train", {}).get("select_best_metric", "val_clean_bit_acc"))
+    select_best_mode = str(cfg.get("train", {}).get("select_best_mode", "max")).lower()
+    if select_best_mode not in {"max", "min"}:
+        raise ValueError(f"Unsupported train.select_best_mode={select_best_mode}")
+    best_selected = -float("inf") if select_best_mode == "max" else float("inf")
+
     for epoch in range(start_epoch, start_epoch + int(cfg["train"]["epochs"])):
         model.train()
         pbar = tqdm(total=steps_per_epoch, desc=f"epoch {epoch + 1}")
@@ -414,6 +433,8 @@ def main() -> None:
             f"presence={val_clean['loss_presence']:.4f} "
             f"bits={val_clean['loss_bits']:.4f} "
             f"bit_acc={val_clean['bit_acc']:.4f} "
+            f"snr_db={val_clean['snr_db']:.2f} "
+            f"delta_l1={val_clean['loss_delta_l1']:.4f} "
             f"iou={val_clean['frame_iou']:.4f} "
             f"wm_frac={val_clean['wm_frac']:.4f}"
         )
@@ -444,6 +465,28 @@ def main() -> None:
             best_clean_bit_acc = val_clean["bit_acc"]
             save_checkpoint(str(ckpt_dir / "best_clean_bitacc.pt"), model, opt, global_step, cfg, epoch + 1)
             print(f"Saved best_clean_bitacc.pt with clean bit_acc={best_clean_bit_acc:.4f}")
+
+        metric_values = {
+            "val_clean_bit_acc": float(val_clean["bit_acc"]),
+            "val_clean_loss_total": float(val_clean["loss_total"]),
+            "val_clean_snr_db": float(val_clean["snr_db"]),
+            "val_attacked_bit_acc": float(val_att["bit_acc"]),
+            "val_attacked_loss_total": float(val_att["loss_total"]),
+        }
+        if select_best_metric not in metric_values:
+            raise ValueError(
+                f"Unsupported train.select_best_metric={select_best_metric}. "
+                f"Supported: {sorted(metric_values.keys())}"
+            )
+        selected_value = metric_values[select_best_metric]
+        better = selected_value > best_selected if select_best_mode == "max" else selected_value < best_selected
+        if better:
+            best_selected = selected_value
+            save_checkpoint(str(ckpt_dir / "best_selected.pt"), model, opt, global_step, cfg, epoch + 1)
+            print(
+                f"Saved best_selected.pt with {select_best_metric}={selected_value:.6f} "
+                f"(mode={select_best_mode})"
+            )
 
     print("Done. Latest checkpoint:", ckpt_dir / "latest.pt")
 

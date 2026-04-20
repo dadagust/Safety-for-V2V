@@ -69,8 +69,16 @@ def _resample(x: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
 def load_audio(path: str | Path, target_sr: int) -> Tuple[np.ndarray, int]:
     """
     Returns mono float32 waveform in [-1, 1] (best-effort) and sample_rate.
+
+    The manifests in this project were originally created on Windows, so some
+    paths contain backslashes. For portability we normalize separators when the
+    raw path does not exist on the current platform.
     """
     path = str(path)
+    if not Path(path).exists() and "\\" in path:
+        alt = path.replace("\\", "/")
+        if Path(alt).exists():
+            path = alt
     x, sr = sf.read(path, dtype="float32", always_2d=False)
     x = _to_mono(np.asarray(x))
     # Some formats may produce >1.0 peaks; clip gently.

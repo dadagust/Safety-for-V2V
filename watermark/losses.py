@@ -77,3 +77,19 @@ def snr_db(clean: torch.Tensor, test: torch.Tensor, eps: float = 1e-8) -> torch.
     sp = torch.mean(clean ** 2, dim=(1, 2))
     np = torch.mean(n ** 2, dim=(1, 2)).clamp_min(eps)
     return 10.0 * torch.log10(sp / np)
+
+
+def l1_loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return torch.mean(torch.abs(x - y))
+
+
+def snr_hinge_loss(
+    clean: torch.Tensor,
+    test: torch.Tensor,
+    target_db: float,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Penalize outputs whose SNR falls below the target."""
+    snr = snr_db(clean, test, eps=eps)
+    target = torch.as_tensor(float(target_db), device=clean.device, dtype=clean.dtype)
+    return torch.relu(target - snr).mean()

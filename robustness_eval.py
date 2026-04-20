@@ -18,7 +18,9 @@ from watermark.attacks import (
     crop_pad_np,
     lowpass_np,
     mp3_roundtrip_np,
+    opus_roundtrip_np,
     resample_speed_np,
+    telephone_channel_np,
 )
 from watermark.data import load_audio
 from watermark.runtime import (
@@ -72,36 +74,63 @@ def detect_and_decode(
             use_soft_mask=use_soft_mask,
         )
         prob = torch.sigmoid(presence_logits)[0]
-        present = bool(present_from_presence_logits(presence_logits, presence_threshold, min_positive_fraction)[0].item())
+        present = bool(
+            present_from_presence_logits(
+                presence_logits, presence_threshold, min_positive_fraction
+            )[0].item()
+        )
         presence_score = float(prob.max().item())
         return present, bit_logits[0], presence_score
 
 
 def build_attack_cases(cfg: Dict[str, Any], sr: int) -> List[Tuple[str, Callable[[np.ndarray], np.ndarray]]]:
+    attacks_cfg = cfg.get("attacks_eval", {}) or {}
     cases: List[Tuple[str, Callable[[np.ndarray], np.ndarray]]] = []
     cases.append(("clean", lambda x: x))
 
-    for snr in cfg["attacks_eval"]["noise_snr_db_list"]:
+    for snr in attacks_cfg.get("noise_snr_db_list", []):
         cases.append((f"noise_snr{snr}", lambda x, snr=snr: add_noise_snr_np(x, float(snr))))
 
-    for f in cfg["attacks_eval"]["resample_factor_list"]:
-        cases.append((f"speed_{f}", lambda x, f=f: resample_speed_np(x, float(f), sr)))
+    for factor in attacks_cfg.get("resample_factor_list", []):
+        cases.append((f"speed_{factor}", lambda x, factor=factor: resample_speed_np(x, float(factor), sr)))
 
-    for c in cfg["attacks_eval"]["lowpass_hz_list"]:
-        cases.append((f"lowpass_{c}", lambda x, c=c: lowpass_np(x, sr, float(c))))
+    for cutoff in attacks_cfg.get("lowpass_hz_list", []):
+        cases.append((f"lowpass_{cutoff}", lambda x, cutoff=cutoff: lowpass_np(x, sr, float(cutoff))))
 
-    for cs in cfg["attacks_eval"]["crop_seconds_list"]:
-        cases.append((f"crop_{cs}s", lambda x, cs=cs: crop_pad_np(x, float(cs), sr)))
+    for crop_seconds in attacks_cfg.get("crop_seconds_list", []):
+        cases.append((f"crop_{crop_seconds}s", lambda x, crop_seconds=crop_seconds: crop_pad_np(x, float(crop_seconds), sr)))
 
-    for b in cfg["attacks_eval"]["bitdepth_list"]:
-        cases.append((f"bitdepth_{b}", lambda x, b=b: bitdepth_reduce_np(x, int(b))))
+    for bits in attacks_cfg.get("bitdepth_list", []):
+        cases.append((f"bitdepth_{bits}", lambda x, bits=bits: bitdepth_reduce_np(x, int(bits))))
 
-    for br in cfg["attacks_eval"]["mp3_bitrates_k"]:
-        cases.append((f"mp3_{br}k", lambda x, br=br: mp3_roundtrip_np(x, sr, int(br))))
-    for br in cfg["attacks_eval"]["aac_bitrates_k"]:
-        cases.append((f"aac_{br}k", lambda x, br=br: aac_roundtrip_np(x, sr, int(br))))
+    for bitrate in attacks_cfg.get("mp3_bitrates_k", []):
+        cases.append((f"mp3_{bitrate}k", lambda x, bitrate=bitrate: mp3_roundtrip_np(x, sr, int(bitrate))))
+    for bitrate in attacks_cfg.get("aac_bitrates_k", []):
+        cases.append((f"aac_{bitrate}k", lambda x, bitrate=bitrate: aac_roundtrip_np(x, sr, int(bitrate))))
+    for bitrate in attacks_cfg.get("opus_bitrates_k", []):
+        cases.append((f"opus_{bitrate}k", lambda x, bitrate=bitrate: opus_roundtrip_np(x, sr, int(bitrate))))
+
+    for preset in attacks_cfg.get("phone_bandwidth_presets", []):
+        preset_name = str(preset).lower()
+        if preset_name == "pstn":
+            cases.append((
+                "phone_pstn",
+                lambda x: telephone_channel_np(x, sr, low_hz=300.0, high_hz=3400.0, narrow_sr=8000, apply_mulaw=True),
+            ))
+        elif preset_name in ("nb", "narrowband"):
+            cases.append((
+                "phone_narrowband",
+                lambda x: telephone_channel_np(x, sr, low_hz=300.0, high_hz=3400.0, narrow_sr=8000, apply_mulaw=False),
+            ))
 
     return cases
+
+
+def first_line_error(exc: Exception) -> str:
+    msg = str(exc).strip()
+    if not msg:
+        msg = exc.__class__.__name__
+    return msg.splitlines()[0][:500]
 
 
 def main() -> None:
@@ -114,6 +143,7 @@ def main() -> None:
     ap.add_argument("--latency", action="store_true", help="Also compute detection/msg accuracy vs chunk duration.")
     ap.add_argument("--embed_mode", type=str, default="auto", choices=["auto", "full", "window", "dropout"])
     ap.add_argument("--use_hard_mask", action="store_true")
+    ap.add_argument("--fail_on_skipped", action="store_true", help="Exit with an error if any configured attack could not be applied.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -137,12 +167,19 @@ def main() -> None:
     attack_cases = build_attack_cases(cfg, sr)
     chunk_secs = list(cfg["latency_probe"]["chunk_seconds"])
 
-    stats = {}
+    stats: Dict[str, Dict[str, Any]] = {}
+    skipped: Dict[str, Dict[str, Any]] = {}
     for name, _fn in attack_cases:
         stats[name] = {
-            "tp": 0, "fp": 0, "tn": 0, "fn": 0,
-            "bit_correct": 0, "bit_total": 0,
-            "msg_correct": 0, "msg_total": 0,
+            "applied": 0,
+            "tp": 0,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "bit_correct": 0,
+            "bit_total": 0,
+            "msg_correct": 0,
+            "msg_total": 0,
         }
         if args.latency:
             for cs in chunk_secs:
@@ -163,7 +200,7 @@ def main() -> None:
         bits = torch.randint(0, 2, (1, nbits), device=device, dtype=torch.float32)
 
         with torch.no_grad():
-            y, mask = embed_batch(
+            y, _mask = embed_batch(
                 x=x,
                 bits=bits,
                 model=model,
@@ -180,8 +217,14 @@ def main() -> None:
             try:
                 y_att_pos = fn(y_np)
                 y_att_neg = fn(x0_np)
-            except subprocess.CalledProcessError:
+            except Exception as exc:
+                rec = skipped.setdefault(name, {"skipped_count": 0, "applied_count": 0, "first_error": first_line_error(exc)})
+                rec["skipped_count"] += 1
                 continue
+
+            stats[name]["applied"] += 1
+            if name in skipped:
+                skipped[name]["applied_count"] = stats[name]["applied"]
 
             y_pos_t = torch.from_numpy(y_att_pos).to(device).view(1, 1, -1)
             y_neg_t = torch.from_numpy(y_att_neg).to(device).view(1, 1, -1)
@@ -208,8 +251,8 @@ def main() -> None:
 
             if args.latency:
                 for cs in chunk_secs:
-                    Tchunk = max(64, int(round(float(cs) * sr)))
-                    y_chunk = y_att_pos[:Tchunk]
+                    chunk_len = max(64, int(round(float(cs) * sr)))
+                    y_chunk = y_att_pos[:chunk_len]
                     y_chunk_t = torch.from_numpy(y_chunk).to(device).view(1, 1, -1)
                     present_c, bits_logits_c, _ = detect_and_decode(model.detector, y_chunk_t, presence_thr, min_frac, use_soft_mask)
                     if present_c:
@@ -221,21 +264,28 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    for name, s in stats.items():
+    rows: List[Dict[str, Any]] = []
+    for name, _fn in attack_cases:
+        s = stats[name]
+        if s["applied"] <= 0:
+            continue
         tp, fp, tn, fn = s["tp"], s["fp"], s["tn"], s["fn"]
         tpr = tp / max(tp + fn, 1)
         fpr = fp / max(fp + tn, 1)
         bit_acc = s["bit_correct"] / max(s["bit_total"], 1)
         msg_acc = s["msg_correct"] / max(s["msg_total"], 1)
 
-        row = {
+        row: Dict[str, Any] = {
             "attack": name,
             "TPR": tpr,
             "FPR": fpr,
             "bit_acc": bit_acc,
             "msg_acc": msg_acc,
-            "TP": tp, "FP": fp, "TN": tn, "FN": fn,
+            "TP": tp,
+            "FP": fp,
+            "TN": tn,
+            "FN": fn,
+            "applied_count": s["applied"],
         }
         if args.latency:
             for cs in chunk_secs:
@@ -243,16 +293,44 @@ def main() -> None:
                 row[f"msg_acc@{cs}s"] = s[f"msg_correct@{cs}s"] / max(s[f"msg_total@{cs}s"], 1)
         rows.append(row)
 
-    fieldnames = list(rows[0].keys()) if rows else []
+    fieldnames = list(rows[0].keys()) if rows else ["attack"]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        for r in rows:
-            w.writerow(r)
+        for row in rows:
+            w.writerow(row)
+
+    skipped_path = out_path.with_name(f"{out_path.stem}_skipped.csv")
+    skipped_rows: List[Dict[str, Any]] = []
+    for name, _fn in attack_cases:
+        rec = skipped.get(name)
+        if rec is None and stats[name]["applied"] <= 0:
+            rec = {"skipped_count": len(paths), "applied_count": 0, "first_error": "attack never applied"}
+        if rec is None:
+            continue
+        rec["applied_count"] = stats[name]["applied"]
+        skipped_rows.append({
+            "attack": name,
+            "applied_count": rec["applied_count"],
+            "skipped_count": rec["skipped_count"],
+            "first_error": rec["first_error"],
+        })
+
+    with skipped_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["attack", "applied_count", "skipped_count", "first_error"])
+        w.writeheader()
+        for row in skipped_rows:
+            w.writerow(row)
 
     print("Wrote:", out_path)
-    for r in rows[:10]:
-        print(r)
+    print("Wrote:", skipped_path)
+    print("Completed attacks:", len(rows), "Configured attacks:", len(attack_cases))
+    if skipped_rows:
+        print("Skipped attack summary:")
+        for row in skipped_rows:
+            print(row)
+        if args.fail_on_skipped:
+            raise SystemExit("One or more configured attacks could not be applied. See skipped CSV for details.")
 
 
 if __name__ == "__main__":
