@@ -1,0 +1,410 @@
+% -------------------------------------------------------------------------
+% Chapter 4: Watermark Evaluation and Robustness Analysis
+% -------------------------------------------------------------------------
+
+\chapter{Watermark Evaluation and Robustness Analysis}
+\label{chap:watermark-results}
+
+This chapter reports the empirical evaluation of the proposed \emph{zero-bit}
+speech watermarking module introduced in Chapter~3. The goal of the module is
+to embed an imperceptible provenance signal into assistant-generated TTS speech
+and to enable fast, key-based verification of \emph{assistant-originated} audio.
+Following the experimental protocol defined in Section~3.6, we focus on two
+questions:
+
+\begin{itemize}
+    \item \textbf{RQ1 (Imperceptibility):} Does watermark embedding noticeably
+    degrade the perceived quality of TTS speech?
+    \item \textbf{RQ2 (Robustness):} Does the watermark remain detectable after
+    realistic signal and channel distortions, including compression and
+    re-recording-like effects?
+\end{itemize}
+
+The results in this chapter are obtained using the benchmarking script
+\texttt{bench\_wm.py}, which systematically applies a suite of attacks to both
+clean and watermarked audio and evaluates watermark presence using a fixed
+decision threshold from the watermark configuration file.
+
+\section{How the Proposed Watermark Works}
+\label{sec:wm-how-it-works}
+
+This section provides an implementation-oriented description of the watermark
+scheme, complementing the high-level design overview in Section~3.3. The
+watermark is \emph{zero-bit}: instead of transmitting a payload, the system only
+needs to decide whether an audio clip contains the assistant's secret watermark
+(\emph{present}) or not (\emph{absent}). This design is appropriate for provenance
+checks in assistant pipelines, where the primary question is whether a signal was
+produced by a trusted TTS component.
+
+\subsection{Embedding as spread-spectrum energy modulation}
+\label{subsec:wm-embed}
+
+Let $x(t)$ be a mono waveform produced by the assistant's TTS model. The
+embedder performs the following steps:
+
+\begin{enumerate}
+    \item \textbf{Resampling and framing.} The waveform is resampled to a fixed
+    sample rate $f_s$ (in our experiments, $f_s=16$~kHz) and split into
+    overlapping frames. A short-time Fourier transform (STFT) is computed to
+    obtain a time--frequency representation.
+    \item \textbf{Keyed bin selection.} A secret key $K$ deterministically
+    defines a pseudo-random selection of time--frequency locations
+    $S \subseteq \{(m,k)\}$ (frame index $m$, frequency bin $k$) that will carry
+    watermark energy. Intuitively, $S$ specifies \emph{where} the watermark
+    ``lives'' in the spectrogram.
+    \item \textbf{Low-amplitude perturbation.} For the selected locations in
+    $S$, the embedder applies a small perturbation to the spectral magnitudes.
+    In a generic spread-spectrum formulation, this can be expressed as
+    \[
+        |X'(m,k)| = |X(m,k)| \cdot (1 + \alpha \, w_{m,k}), \quad (m,k)\in S,
+    \]
+    where $w_{m,k}\in\{-1,+1\}$ is a pseudo-random sign pattern derived from
+    $K$, and $\alpha$ is a small embedding strength chosen to preserve
+    imperceptibility. Locations outside $S$ are left unchanged.
+    \item \textbf{Inverse transform.} The modified spectrum is converted back
+    to the time domain via inverse STFT and overlap--add, yielding a watermarked
+    waveform $x_{\mathrm{wm}}(t)$.
+\end{enumerate}
+
+Because energy is distributed across many time--frequency bins, the watermark
+is \emph{spread-spectrum}: each individual modification is weak and typically
+inaudible, but evidence can be aggregated over time at detection. In principle,
+longer utterances provide more watermark observations and can improve
+detectability by reducing variance of the detection statistic.
+
+\subsection{Detection as a correlation-like statistic}
+\label{subsec:wm-detect}
+
+Given a candidate waveform $\tilde{x}(t)$, the verifier repeats the same
+pre-processing steps (resampling, STFT computation, and keyed selection of
+locations $S$) and computes a scalar detection score $s(\tilde{x})$. The score is
+designed to be high if the expected keyed pattern is present and low otherwise.
+A typical statistic in spread-spectrum watermarking is a normalized correlation:
+
+\[
+s(\tilde{x}) \propto \frac{1}{|S|}\sum_{(m,k)\in S} w_{m,k}\,\phi(\tilde{X}(m,k)),
+\]
+
+where $\phi(\cdot)$ denotes the chosen feature transform (e.g., magnitude,
+log-magnitude, or a locally normalized residual). The exact form in our
+implementation is correlation-based and yields a continuous score.
+
+The verifier compares the score to a fixed threshold $\tau$:
+
+\[
+\text{watermark present} \iff s(\tilde{x}) \ge \tau.
+\]
+
+A high threshold reduces false alarms (clean audio incorrectly classified as
+watermarked), while a low threshold improves true detection at the cost of more
+false alarms. Section~\ref{sec:wm-robustness-results} reports all results at the
+fixed threshold used in the benchmark configuration.
+
+\subsection{Security assumptions}
+\label{subsec:wm-assumptions}
+
+Consistent with the threat model in Chapter~1, the watermark is keyed. We assume
+attackers do not have white-box access to $K$ or to the exact embedding and
+detection code. Under this assumption, an adversary attempting to impersonate
+the assistant must either: (i) obtain the key, or (ii) remove the watermark using
+generic signal processing operations (filtering, re-encoding, denoising, etc.),
+which typically also degrade audio quality. The experiments below evaluate
+precisely these generic transformations.
+
+\section{Evaluation Setup}
+\label{sec:wm-eval-setup}
+
+\subsection{Dataset}
+\label{subsec:wm-dataset}
+
+The robustness benchmark was run on a set of $N=1001$ assistant-style
+utterances (mono WAV files) generated by the TTS pipeline and resampled to the
+watermark sample rate. For each utterance, the benchmark constructs both a
+\emph{clean} version $x(t)$ and a \emph{watermarked} version
+$x_{\mathrm{wm}}(t)$, yielding $2N$ base signals.
+
+\subsection{Attack suite}
+\label{subsec:wm-attacks}
+
+Each base signal is subjected to a collection of common distortions intended to
+approximate real-world channels and naive watermark removal attempts. The suite
+covers:
+
+\begin{itemize}
+    \item \textbf{Identity (no attack).}
+    \item \textbf{Amplitude transforms:} gain changes ($\pm 6$~dB) and hard
+    clipping (peak limits 0.8 and 0.6).
+    \item \textbf{Bandwidth and sampling effects:} resampling round-trips
+    (downsample then upsample back) to 16~kHz and 8~kHz; low-pass filtering
+    with cutoffs 7~kHz and 3.4~kHz (the latter approximates telephony
+    bandwidth).
+    \item \textbf{Additive noise:} white noise at several SNR levels
+    (30/20/10/5~dB).
+    \item \textbf{Reverberation-like effects:} convolution with a synthetic
+    impulse response (exponential decay with random early reflections) at
+    $RT_{60}\in\{0.2,0.4\}$ seconds.
+    \item \textbf{Lossy compression:} codec round-trips via \texttt{ffmpeg} for
+    MP3 (320/128/64/32~kbps) and AAC (128/64~kbps).
+\end{itemize}
+
+Overall, the benchmark evaluates 21 attack conditions per signal. Because both
+clean and watermarked versions are evaluated, each attack yields
+$2N=2002$ scored trials.
+
+\subsection{Metrics}
+\label{subsec:wm-metrics}
+
+For each trial, the detector produces a scalar score $s$ and a binary decision at
+the configured threshold $\tau$. We report (TPR/FPR are shown as fractions in $[0,1]$, i.e., multiply by 100 for percent):
+
+\begin{itemize}
+    \item \textbf{True Positive Rate (TPR):} fraction of watermarked signals
+    classified as watermarked:
+    $\mathrm{TPR}=\Pr[s\ge\tau \mid \text{watermarked}]$.
+    \item \textbf{False Positive Rate (FPR):} fraction of clean signals
+    incorrectly classified as watermarked:
+    $\mathrm{FPR}=\Pr[s\ge\tau \mid \text{clean}]$.
+    \item \textbf{Mean score shift:} mean detector score for watermarked and
+    clean audio under each attack, $\overline{s}_{wm}$ and $\overline{s}_{clean}$,
+    which provides additional insight even when TPR/FPR at a fixed threshold are
+    low.
+\end{itemize}
+
+\section{Imperceptibility Evaluation (RQ1)}
+\label{sec:wm-imperceptibility}
+
+Robustness alone is insufficient for watermark deployment: assistant responses
+must remain natural and free of audible artifacts. The thesis methodology
+(Section~3.6.1) proposes two complementary subjective protocols:
+
+\begin{itemize}
+    \item \textbf{Mean Opinion Score (MOS):} listeners rate individual utterances
+    on a five-point quality scale.
+    \item \textbf{A/B preference:} listeners compare paired clean vs. watermarked
+    utterances and select the preferred sample or ``no preference''.
+\end{itemize}
+
+At the time of writing, the benchmark results available for this chapter focus on
+\emph{robustness} (RQ2) and do not yet include a completed human-subject
+listening study. Therefore, the chapter does not claim a definitive answer to
+RQ1. In the final thesis version, this section should be extended with:
+
+\begin{enumerate}
+    \item the number of participants and listening conditions (headphones,
+    quiet room, online platform, etc.);
+    \item MOS statistics for clean vs. watermarked speech (mean $\pm$ standard
+    deviation, significance tests); and
+    \item A/B preference outcomes (fraction preferring clean, preferring
+    watermarked, and no preference).
+\end{enumerate}
+
+Nevertheless, the robustness results in Section~\ref{sec:wm-robustness-results}
+are informative for the imperceptibility--robustness trade-off: the low baseline
+TPR at a conservative threshold suggests that watermark strength may currently be
+tuned cautiously, potentially prioritizing imperceptibility at the expense of
+detectability.
+
+\section{Robustness Results}
+\label{sec:wm-robustness-results}
+
+The benchmark used a fixed watermark decision threshold of $\tau=0.02$ (as
+configured in \texttt{watermark.yaml}). Table~\ref{tab:wm-robustness-full}
+summarizes detection performance for each attack.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Zero-bit watermark detection results at fixed threshold $\tau=0.02$
+on $N=1001$ utterances. For each attack we report TPR/FPR and mean detector
+scores for watermarked and clean signals. Because each attack is evaluated on
+both clean and watermarked versions, each condition has $n=2002$ trials.}
+\label{tab:wm-robustness-full}
+\begin{tabular}{l l r r r r}
+\hline
+\textbf{Attack} & \textbf{Params} &
+\textbf{TPR} & \textbf{FPR} &
+$\boldsymbol{\overline{s}_{wm}}$ & $\boldsymbol{\overline{s}_{clean}}$ \\
+\hline
+none & -- & 0.0609 & 0.0000 & 0.0133 & -0.0286 \\
+gain & $+6$ dB & 0.0529 & 0.0000 & 0.0130 & -0.0286 \\
+gain & $-6$ dB & 0.0659 & 0.0000 & 0.0135 & -0.0286 \\
+clip & 0.8 & 0.0609 & 0.0000 & 0.0133 & -0.0286 \\
+clip & 0.6 & 0.0589 & 0.0000 & 0.0133 & -0.0286 \\
+resample\_roundtrip & 16 kHz & 0.0609 & 0.0000 & 0.0133 & -0.0286 \\
+resample\_roundtrip & 8 kHz & 0.0000 & 0.0000 & -0.0467 & -0.0479 \\
+lowpass & 7000 Hz & 0.0160 & 0.0000 & 0.0113 & -0.0295 \\
+lowpass & 3400 Hz & 0.0000 & 0.0000 & -0.0418 & -0.0460 \\
+white\_noise & 30 dB SNR & 0.0000 & 0.0000 & $1.9\times 10^{-5}$ & -0.0203 \\
+white\_noise & 20 dB SNR & 0.0000 & 0.0000 & 0.0022 & -0.0135 \\
+white\_noise & 10 dB SNR & 0.0000 & 0.0000 & 0.0039 & -0.0057 \\
+white\_noise & 5 dB SNR & 0.0000 & 0.0000 & 0.0040 & -0.0026 \\
+reverb\_synth & $RT_{60}=0.2$ & 0.0000 & 0.0000 & -0.0041 & -0.0475 \\
+reverb\_synth & $RT_{60}=0.4$ & 0.0000 & 0.0000 & -0.0050 & -0.0466 \\
+mp3\_roundtrip & 320 kbps & 0.2837 & 0.0000 & 0.0178 & -0.0274 \\
+mp3\_roundtrip & 128 kbps & 0.2997 & 0.0000 & 0.0179 & -0.0274 \\
+mp3\_roundtrip & 64 kbps & 0.1708 & 0.0000 & 0.0162 & -0.0271 \\
+mp3\_roundtrip & 32 kbps & 0.0020 & 0.0000 & 0.0086 & -0.0269 \\
+aac\_roundtrip & 128 kbps & 0.0969 & 0.0000 & 0.0147 & -0.0271 \\
+aac\_roundtrip & 64 kbps & 0.0909 & 0.0000 & 0.0145 & -0.0271 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Baseline performance and threshold behavior}
+\label{subsec:wm-baseline}
+
+In the \emph{no-attack} condition, the watermark achieves a TPR of
+$0.0609$ (61 detections out of 1001 watermarked utterances), while maintaining
+an FPR of $0$ (0 false alarms out of 1001 clean utterances). This indicates that
+the current operating point is extremely conservative: clean audio is strongly
+separated from the threshold (mean score $\overline{s}_{clean}\approx -0.0286$),
+but the average watermark score $\overline{s}_{wm}\approx 0.0133$ remains below
+$\tau=0.02$. As a result, only the upper tail of the watermarked score
+distribution exceeds the threshold.
+
+Operationally, this highlights an important trade-off: the system currently favors
+\emph{no false alarms} over \emph{high recall}. For a provenance check, false
+alarms are indeed undesirable (they could incorrectly authenticate attacker
+audio), but false negatives can harm usability if legitimate assistant audio is
+frequently rejected. A more complete characterization would include ROC/DET
+analysis to select $\tau$ based on a target operating point (e.g., a specified
+upper bound on FPR). In the present evaluation we keep $\tau$ fixed to isolate
+the effect of channel distortions.
+
+\subsection{Robustness to simple amplitude distortions}
+\label{subsec:wm-amplitude}
+
+Gain changes of $\pm 6$~dB produce only small changes in TPR (5.29\% and
+6.59\%, respectively), and clipping at 0.8/0.6 similarly leaves baseline
+performance nearly unchanged. This behavior is consistent with a detector that
+relies on relative spectral patterns or internally normalized statistics rather than
+absolute waveform amplitude.
+
+\subsection{Vulnerability to bandwidth reduction and resampling}
+\label{subsec:wm-bandwidth}
+
+Bandwidth reduction is a critical failure mode. Resampling through an 8~kHz
+bottleneck (downsample to 8~kHz, then upsample back) yields a TPR of 0 at the
+fixed threshold. Likewise, a 3.4~kHz low-pass filter (telephony-like bandwidth)
+also reduces TPR to 0.
+
+These results strongly suggest that, in its current configuration, the watermark's
+detectable energy is concentrated in frequency regions that are removed or
+distorted by narrowband channels. In practical terms, an attacker can remove the
+watermark using a \emph{low-effort} transformation (downsampling or aggressive
+low-pass filtering) while still preserving intelligibility of the speech content.
+This vulnerability directly impacts deployment scenarios where assistant audio
+passes through bandwidth-limited transmission paths or is re-recorded through
+devices with limited high-frequency response.
+
+A milder low-pass filter at 7~kHz (still within the 16~kHz sampling regime)
+reduces TPR from 6.09\% to 1.60\%, indicating that even partial attenuation of
+the upper band can substantially weaken detection.
+
+\subsection{Vulnerability to additive noise}
+\label{subsec:wm-noise}
+
+Under additive white noise, the watermark is not detected at all at the fixed
+threshold for SNR values from 30~dB down to 5~dB (TPR=0 across all tested
+levels). While the mean watermark score remains slightly positive at lower SNR
+levels (e.g., $\overline{s}_{wm}\approx 0.004$ at 5~dB), it stays well below the
+configured threshold.
+
+Notably, increasing noise moves the \emph{clean} mean score toward zero
+($\overline{s}_{clean}$ increases from approximately $-0.0286$ to $-0.0026$ at
+5~dB). This indicates a potential risk when lowering the threshold to improve
+TPR: noise may simultaneously increase false alarms by shifting clean scores
+upward. This interaction suggests that robust watermarking in noisy environments
+requires either stronger embedding, more sophisticated normalization, or
+augmentation-aware thresholding.
+
+\subsection{Vulnerability to reverberation and convolutional effects}
+\label{subsec:wm-reverb}
+
+Synthetic reverberation (modeled as convolution with a random impulse response
+with $RT_{60}\in\{0.2,0.4\}$) yields TPR=0 at the fixed threshold. Unlike the
+noise case, the watermarked mean score remains higher than the clean mean score
+(e.g., $-0.0041$ vs. $-0.0475$ at $RT_{60}=0.2$), indicating that some watermark
+evidence may still be present but is substantially weakened and shifted below the
+decision boundary.
+
+This pattern is consistent with time--frequency smearing: reverberation introduces
+delayed replicas of the signal, altering frame-local spectral structure and
+reducing the correlation with the keyed template.
+
+\subsection{Behavior under lossy audio codecs}
+\label{subsec:wm-codecs}
+
+Lossy compression shows mixed behavior. MP3 round-trips at 128--320~kbps yield
+the strongest results in this benchmark (TPR $\approx 0.28$--$0.30$), while
+lower MP3 bitrates degrade sharply (TPR 0.17 at 64~kbps and near zero at
+32~kbps). AAC yields moderate TPR values around 9--10\% at 64--128~kbps.
+
+Interestingly, for high-bitrate MP3 the measured TPR is \emph{higher} than in the
+no-attack case. The mean watermark score also increases (from 0.0133 to
+$\approx 0.0179$), suggesting that the codec round-trip can shift the score
+distribution upward, making more watermarked samples cross the fixed threshold.
+One plausible explanation is that codec quantization and psychoacoustic shaping
+alter spectral statistics in a way that better aligns with the detector's feature
+normalization. However, despite this improvement, the recall remains below 31\%,
+and therefore the watermark is still unreliable as a standalone provenance signal
+under the current operating point.
+
+\section{Summary of Current Vulnerabilities}
+\label{sec:wm-vuln-summary}
+
+The robustness benchmark supports the following conclusions about the current
+implementation:
+
+\begin{itemize}
+    \item \textbf{Strong at avoiding false alarms (at $\tau=0.02$).} FPR is 0 for
+    all tested attacks, meaning no clean samples exceed the threshold. This is a
+    desirable property for provenance verification when the cost of falsely
+    authenticating attacker audio is high.
+    \item \textbf{Weak true detection even without channel distortion.} Baseline
+    TPR is only 6.09\%. This indicates that the watermark is either embedded very
+    conservatively (to preserve imperceptibility), the threshold is set too high,
+    or implementation details reduce effective watermark strength.
+    \item \textbf{Highly vulnerable to bandwidth limitation.} Resampling through
+    8~kHz and low-pass filtering at 3.4~kHz fully remove detectability at the
+    fixed threshold. This implies that the watermark relies on spectral regions
+    that are absent in narrowband channels.
+    \item \textbf{Highly vulnerable to additive noise and reverberation.} In the
+    tested regime, both noise and reverberation lead to TPR=0 at the fixed
+    threshold, which is problematic for realistic far-field and re-recording
+    scenarios.
+    \item \textbf{Partially robust to moderate codec compression.} MP3 and AAC
+    at moderate to high bitrates preserve some detectability, but robustness
+    degrades at low bitrates.
+\end{itemize}
+
+Overall, these findings suggest that the current watermark configuration is
+\emph{not yet robust} to realistic channel degradations expected in voice
+assistant deployments, especially when the audio may be transmitted over
+bandwidth-limited links or captured in noisy and reverberant environments.
+
+\section{Chapter Conclusion}
+\label{sec:wm-chapter-conclusion}
+
+This chapter evaluated the proposed zero-bit spread-spectrum watermark under a
+broad suite of signal and channel distortions. At the current threshold
+$\tau=0.02$, the watermark exhibits \emph{zero false alarms} across all tested
+conditions, but also exhibits \emph{low true detection} in clean conditions and
+fails under several realistic degradations (narrowband resampling, low-pass
+filtering, additive noise, and reverberation). These results identify clear
+failure modes and motivate subsequent work on (i) threshold selection via ROC/DET
+analysis, (ii) multi-band or bandwidth-aware embedding, and (iii) improved
+normalization and augmentation strategies to maintain detectability under
+noise and re-recording.
+
+\section*{References}
+\small
+\noindent [1] [15] (PDF) On the Security and Privacy Challenges of Virtual Assistants. \url{https://www.researchgate.net/publication/350413576_On_the_Security_and_Privacy_Challenges_of_Virtual_Assistants}\par
+\noindent [2] [6] [7] [8] [13] [17] [18] [38] [39] [40] [41] [42] [43] [44] [45] [48] [2308.14970] Audio Deepfake Detection: A Survey. \url{https://ar5iv.labs.arxiv.org/html/2308.14970}\par
+\noindent [3] [16] usenix.org. \url{https://www.usenix.org/system/files/usenixsecurity24-jiang-nan.pdf}\par
+\noindent [4] [5] [12] [23] [24] [29] [30] [31] [49] usenix.org. \url{https://www.usenix.org/system/files/usenixsecurity25-zong.pdf}\par
+\noindent [9] [11] [19] [20] [21] [22] Audio Watermarking Won’t Solve the Real Dangers of AI Voice Manipulation -- Center for Data Innovation. \url{https://datainnovation.org/2024/10/audio-watermarking-wont-solve-the-real-dangers-of-ai-voice-manipulation/}\par
+\noindent [10] [28] [35] [36] [37] [46] [47] [50] [51] [52] [53] [54] FakeMark: Deepfake Speech Attribution With Watermarked Artifacts. \url{https://arxiv.org/html/2510.12042v2}\par
+\noindent [14] Proactive Detection of Voice Cloning with Localized Watermarking. \url{https://ai.meta.com/research/publications/proactive-detection-of-voice-cloning-with-localized-watermarking/}\par
+\noindent [25] [26] [27] [2401.17264] Proactive Detection of Voice Cloning with Localized Watermarking. \url{https://arxiv.org/abs/2401.17264}\par
+\noindent [32] [33] [34] [2504.14832] Protecting Your Voice: Temporal-aware Robust Watermarking. \url{https://arxiv.org/abs/2504.14832}\par
